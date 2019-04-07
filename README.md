@@ -26,17 +26,17 @@ import (
 )
 
 func main() {
-	listener, _ := raknet.Listen("0.0.0.0:19132")
-	defer listener.Close()
-	for {
-		conn, _ := listener.Accept()
-		
-		b := make([]byte, conn.MaxPacketSize())
-		_, _ = conn.Read(b)
-		_, _ = conn.Write([]byte{1, 2, 3})
-		
-		conn.Close()
-	}
+    listener, _ := raknet.Listen("0.0.0.0:19132")
+    defer listener.Close()
+    for {
+        conn, _ := listener.Accept()
+        
+        b := make([]byte, conn.MaxPacketSize())
+        _, _ = conn.Read(b)
+        _, _ = conn.Write([]byte{1, 2, 3})
+        
+        conn.Close()
+    }
 }
 ```
 
@@ -50,9 +50,9 @@ import (
 )
 
 func main() {
-	conn, _ := raknet.Dial("mco.mineplex.com:19132")
-	defer conn.Close()
-	
+    conn, _ := raknet.Dial("mco.mineplex.com:19132")
+    defer conn.Close()
+    
     b := make([]byte, conn.MaxPacketSize())
     _, _ = conn.Write([]byte{1, 2, 3})
     _, _ = conn.Read(b)
