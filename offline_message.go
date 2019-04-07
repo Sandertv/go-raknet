@@ -10,9 +10,9 @@ const (
 	idUnconnectedPong byte = 0x1c
 
 	idOpenConnectionRequest1 byte = 0x05
-	idOpenConnectionReply1 byte = 0x06
+	idOpenConnectionReply1   byte = 0x06
 	idOpenConnectionRequest2 byte = 0x07
-	idOpenConnectionReply2 byte = 0x08
+	idOpenConnectionReply2   byte = 0x08
 
 	idIncompatibleProtocolVersion byte = 0x19
 )

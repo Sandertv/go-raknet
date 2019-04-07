@@ -67,18 +67,18 @@ func (listener *Listener) Accept() (*Conn, error) {
 		return nil, fmt.Errorf("error accepting connection: listener closed")
 	}
 	select {
-		case <-conn.finishedSequence:
-			go func() {
-				<-conn.close
-				// Insert the boolean back in the channel so that other readers of the channel also receive
-				// the signal.
-				conn.close <- true
-				delete(listener.connections, conn.addr.String())
-			}()
-			return conn, nil
-		case <-time.After(time.Second * 5):
-			// It took too long to finish the connection sequence. We cancel and return an error instead.
-			return nil, fmt.Errorf("error accepting connection: timeout during connection sequence")
+	case <-conn.finishedSequence:
+		go func() {
+			<-conn.close
+			// Insert the boolean back in the channel so that other readers of the channel also receive
+			// the signal.
+			conn.close <- true
+			delete(listener.connections, conn.addr.String())
+		}()
+		return conn, nil
+	case <-time.After(time.Second * 5):
+		// It took too long to finish the connection sequence. We cancel and return an error instead.
+		return nil, fmt.Errorf("error accepting connection: timeout during connection sequence")
 	}
 }
 

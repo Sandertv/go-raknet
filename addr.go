@@ -34,10 +34,10 @@ func (addr *rakAddr) UnmarshalBinary(b []byte) error {
 		}
 		// Construct an IPv4 out of the 4 bytes we just read.
 		addr.IP = net.IPv4(
-			(-ipBytes[0] - 1) & 0xff,
-			(-ipBytes[1] - 1) & 0xff,
-			(-ipBytes[2] - 1) & 0xff,
-			(-ipBytes[3] - 1) & 0xff,
+			(-ipBytes[0]-1)&0xff,
+			(-ipBytes[1]-1)&0xff,
+			(-ipBytes[2]-1)&0xff,
+			(-ipBytes[3]-1)&0xff,
 		)
 		var port int16
 		if err := binary.Read(buffer, binary.BigEndian, &port); err != nil {
@@ -91,7 +91,7 @@ func (addr *rakAddr) MarshalBinary() (b []byte, err error) {
 		ipBytes := addr.IP.To4()
 
 		// If the IP is an IPv4 IP, we write all 4 bytes individually.
-		if _, err := buffer.Write([]byte{ipBytes[0]&0xff, ^ipBytes[1]&0xff, ^ipBytes[2]&0xff, ^ipBytes[3]&0xff}); err != nil {
+		if _, err := buffer.Write([]byte{ipBytes[0] & 0xff, ^ipBytes[1] & 0xff, ^ipBytes[2] & 0xff, ^ipBytes[3] & 0xff}); err != nil {
 			return nil, fmt.Errorf("error writing raknet address ipv4 bytes: %v", err)
 		}
 		// Finally write the port.

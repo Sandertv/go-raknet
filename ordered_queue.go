@@ -8,8 +8,8 @@ import (
 // that has been inserted with an index if all indices below that aren't also taken out.
 // orderedQueue is not safe for concurrent use.
 type orderedQueue struct {
-	queue map[uint32]interface{}
-	lowestIndex uint32
+	queue        map[uint32]interface{}
+	lowestIndex  uint32
 	highestIndex uint32
 }
 
@@ -26,7 +26,7 @@ func (queue *orderedQueue) put(index uint32, value interface{}) error {
 	if _, ok := queue.queue[index]; ok {
 		return fmt.Errorf("cannot set value at index %v: already has a value", index)
 	}
-	if index + 1 > queue.highestIndex {
+	if index+1 > queue.highestIndex {
 		queue.highestIndex = index + 1
 	}
 	queue.queue[index] = value

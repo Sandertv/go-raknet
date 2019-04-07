@@ -24,8 +24,8 @@ const (
 
 var (
 	errConnectionClosed = "error reading from conn: connection closed"
-	errUseOfClosed = "use of closed network connection"
-	errReadTimeout = "error reading from conn: read timeout"
+	errUseOfClosed      = "use of closed network connection"
+	errReadTimeout      = "error reading from conn: read timeout"
 )
 
 // ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
@@ -44,13 +44,13 @@ func ErrReadTimeout(err error) bool {
 // Methods may be called on Conn from multiple goroutines simultaneously.
 type Conn struct {
 	conn net.PacketConn
-	addr     net.Addr
+	addr net.Addr
 
-	writeLock sync.Mutex
+	writeLock          sync.Mutex
 	sendSequenceNumber uint32
-	sendOrderIndex uint32
-	sendMessageIndex uint32
-	sendSplitID uint32
+	sendOrderIndex     uint32
+	sendMessageIndex   uint32
+	sendSplitID        uint32
 
 	// finishedSequence is a channel that has a value submitted to it once the connection has finished the
 	// RakNet connection sequence.
@@ -94,18 +94,18 @@ type Conn struct {
 // newConn constructs a new connection specifically dedicated to the address passed.
 func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn {
 	c := &Conn{
-		addr:             addr,
-		conn:             conn,
-		mtuSize:          mtuSize,
-		id:               id,
-		finishedSequence: make(chan bool),
-		splits:           make(map[uint16][]*packet),
+		addr:              addr,
+		conn:              conn,
+		mtuSize:           mtuSize,
+		id:                id,
+		finishedSequence:  make(chan bool),
+		splits:            make(map[uint16][]*packet),
 		datagramRecvQueue: newOrderedQueue(),
-		packetQueue:      newOrderedQueue(),
-		recoveryQueue: newOrderedQueue(),
-		close:            make(chan bool, 1),
-		packetChan:       make(chan *bytes.Buffer, 128),
-		lastPacketTime: time.Now(),
+		packetQueue:       newOrderedQueue(),
+		recoveryQueue:     newOrderedQueue(),
+		close:             make(chan bool, 1),
+		packetChan:        make(chan *bytes.Buffer, 128),
+		lastPacketTime:    time.Now(),
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second * 4)
@@ -279,7 +279,7 @@ const (
 // split splits a content buffer in smaller buffers so that they do not exceed the MTU size that the
 // connection holds.
 func (conn *Conn) split(b []byte) [][]byte {
-	maxSize := int(conn.mtuSize - packetAdditionalSize) - 28
+	maxSize := int(conn.mtuSize-packetAdditionalSize) - 28
 	contentLength := len(b)
 	if contentLength > maxSize {
 		// If the content size is bigger than the maximum size here, it means the packet will get split. This
@@ -287,20 +287,20 @@ func (conn *Conn) split(b []byte) [][]byte {
 		maxSize -= splitAdditionalSize
 	}
 	fragmentCount := contentLength / maxSize
-	if contentLength % maxSize != 0 {
+	if contentLength%maxSize != 0 {
 		// If the content length can't be divided by maxSize perfectly, we need to reserve another fragment
 		// for the last bit of the packet.
 		fragmentCount++
 	}
 	fragments := make([][]byte, fragmentCount)
 	for i := 0; i < fragmentCount; i++ {
-		if i == fragmentCount - 1 {
+		if i == fragmentCount-1 {
 			// We've reached the last fragment. The last fragment exists out of the remaining buffer.
-			fragments[i] = b[i * maxSize:]
+			fragments[i] = b[i*maxSize:]
 			break
 		}
 		// Take a piece out of the content with the size of maxSize.
-		fragments[i] = b[i * maxSize:i*maxSize + maxSize]
+		fragments[i] = b[i*maxSize : i*maxSize+maxSize]
 	}
 	return fragments
 }
@@ -312,13 +312,13 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
 	}
-	if headerFlags & bitFlagValid == 0 {
+	if headerFlags&bitFlagValid == 0 {
 		return fmt.Errorf("error processing datagram header: datagram does not have the valid bitflag set")
 	}
 	switch {
-	case headerFlags & bitFlagACK != 0:
+	case headerFlags&bitFlagACK != 0:
 		return conn.handleACK(b)
-	case headerFlags & bitFlagNACK != 0:
+	case headerFlags&bitFlagNACK != 0:
 		return conn.handleNACK(b)
 	default:
 		return conn.receiveDatagram(b)
@@ -543,10 +543,10 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 		m = make([]*packet, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
-	if p.splitIndex < 0 || p.splitIndex > uint32(len(m) - 1) {
+	if p.splitIndex < 0 || p.splitIndex > uint32(len(m)-1) {
 		// The split index was either negative or was bigger than the slice size, meaning the packet is
 		// invalid.
-		return fmt.Errorf("error handing split packet: split ID %v is out of range (0 - %v)", p.splitID, len(m) - 1)
+		return fmt.Errorf("error handing split packet: split ID %v is out of range (0 - %v)", p.splitID, len(m)-1)
 	}
 	m[p.splitIndex] = p
 
@@ -583,7 +583,7 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 // an error is returned.
 func (conn *Conn) sendACK(packets ...uint32) error {
 	ack := &acknowledgement{packets: packets}
-	buffer := bytes.NewBuffer([]byte{bitFlagACK|bitFlagValid})
+	buffer := bytes.NewBuffer([]byte{bitFlagACK | bitFlagValid})
 	if err := ack.write(buffer); err != nil {
 		return fmt.Errorf("error encoding ACK packet: %v", err)
 	}
@@ -597,7 +597,7 @@ func (conn *Conn) sendACK(packets ...uint32) error {
 // an error is returned.
 func (conn *Conn) sendNACK(packets ...uint32) error {
 	ack := &acknowledgement{packets: packets}
-	buffer := bytes.NewBuffer([]byte{bitFlagNACK|bitFlagValid})
+	buffer := bytes.NewBuffer([]byte{bitFlagNACK | bitFlagValid})
 	if err := ack.write(buffer); err != nil {
 		return fmt.Errorf("error encoding NACK packet: %v", err)
 	}

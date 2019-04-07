@@ -149,9 +149,9 @@ func clientListen(rakConn *Conn, conn net.Conn) {
 }
 
 type connState struct {
-	conn net.Conn
+	conn       net.Conn
 	remoteAddr net.Addr
-	id int64
+	id         int64
 
 	// mtuSize is the final MTU size found by sending open connection request 1 packets. It is the MTU size
 	// sent by the server.
@@ -278,7 +278,7 @@ func (state *connState) sendOpenConnectionRequest1() error {
 	if err := binary.Write(b, binary.BigEndian, packet); err != nil {
 		return fmt.Errorf("error writing open connection request 1: %v", err)
 	}
-	padding := make([]byte, state.discoveringMTUSize - int16(b.Len()) - 28)
+	padding := make([]byte, state.discoveringMTUSize-int16(b.Len())-28)
 	if _, err := b.Write(padding); err != nil {
 		return fmt.Errorf("error writing open connection request 1 padding: %v", err)
 	}
