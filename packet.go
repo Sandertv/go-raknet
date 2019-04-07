@@ -20,10 +20,10 @@ const (
 	idConnectedPing = 0x00
 	idConnectedPong = 0x03
 
-	idConnectionRequest = 0x09
+	idConnectionRequest         = 0x09
 	idConnectionRequestAccepted = 0x10
-	idNewIncomingConnection = 0x13
-	idDisconnectNotification = 0x15
+	idNewIncomingConnection     = 0x13
+	idDisconnectNotification    = 0x15
 )
 
 const (
@@ -68,14 +68,14 @@ type connectedPong struct {
 }
 
 type connectionRequest struct {
-	ClientGUID int64
+	ClientGUID       int64
 	RequestTimestamp int64
-	Secure bool
+	Secure           bool
 }
 
 type connectionRequestAccepted struct {
 	// ClientAddress
-	RequestTimestamp int64
+	RequestTimestamp  int64
 	AcceptedTimestamp int64
 	// 20 system addresses
 }
@@ -85,10 +85,10 @@ type newIncomingConnection connectionRequestAccepted
 type packet struct {
 	reliability byte
 
-	content    []byte
-	messageIndex uint32
+	content       []byte
+	messageIndex  uint32
 	sequenceIndex uint32
-	orderIndex uint32
+	orderIndex    uint32
 
 	split      bool
 	splitCount uint32
@@ -104,7 +104,7 @@ func (packet *packet) write(b *bytes.Buffer) error {
 	if err := b.WriteByte(header); err != nil {
 		return fmt.Errorf("error writing packet header: %v", err)
 	}
-	if err := binary.Write(b, binary.BigEndian, uint16(len(packet.content)) << 3); err != nil {
+	if err := binary.Write(b, binary.BigEndian, uint16(len(packet.content))<<3); err != nil {
 		return fmt.Errorf("error writing packet content length: %v", err)
 	}
 	if packet.reliable() {
@@ -232,10 +232,10 @@ func (packet *packet) sequenced() bool {
 }
 
 const (
-	// PacketRange indicates a range of packets, followed by the first and the last packet in the range.
-	PacketRange = iota
-	// PacketSingle indicates a single packet, followed by its sequence number.
-	PacketSingle
+	// packetRange indicates a range of packets, followed by the first and the last packet in the range.
+	packetRange = iota
+	// packetSingle indicates a single packet, followed by its sequence number.
+	packetSingle
 )
 
 // acknowledgement is an acknowledgement packet that may either be an ACK or a NACK, depending on the purpose
@@ -276,7 +276,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 			if firstPacketInRange == lastPacketInRange {
 				// First packet equals last packet, so we have a single packet record. Write down the packet,
 				// and set the first and last packet to the current packet.
-				if err := buffer.WriteByte(PacketSingle); err != nil {
+				if err := buffer.WriteByte(packetSingle); err != nil {
 					return err
 				}
 				if err := writeUint24(buffer, firstPacketInRange); err != nil {
@@ -288,7 +288,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 			} else {
 				// There's a gap between the first and last packet, so we have a range of packets. Write the
 				// first and last packet of the range and set both to the current packet.
-				if err := buffer.WriteByte(PacketRange); err != nil {
+				if err := buffer.WriteByte(packetRange); err != nil {
 					return err
 				}
 				if err := writeUint24(buffer, firstPacketInRange); err != nil {
@@ -309,14 +309,14 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 	// Make sure the last single packet/range is written, as we always need to know one packet ahead to know
 	// how we should write the current.
 	if firstPacketInRange == lastPacketInRange {
-		if err := buffer.WriteByte(PacketSingle); err != nil {
+		if err := buffer.WriteByte(packetSingle); err != nil {
 			return err
 		}
 		if err := writeUint24(buffer, firstPacketInRange); err != nil {
 			return err
 		}
 	} else {
-		if err := buffer.WriteByte(PacketRange); err != nil {
+		if err := buffer.WriteByte(packetRange); err != nil {
 			return err
 		}
 		if err := writeUint24(buffer, firstPacketInRange); err != nil {
@@ -347,8 +347,8 @@ func (ack *acknowledgement) read(b *bytes.Buffer) error {
 		if err != nil {
 			return err
 		}
-		switch recordType{
-		case PacketRange:
+		switch recordType {
+		case packetRange:
 			start, err := readUint24(b)
 			if err != nil {
 				return err
@@ -361,7 +361,7 @@ func (ack *acknowledgement) read(b *bytes.Buffer) error {
 				ack.packets = append(ack.packets, pack)
 				count++
 			}
-		case PacketSingle:
+		case packetSingle:
 			packet, err := readUint24(b)
 			if err != nil {
 				return err
