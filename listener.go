@@ -283,5 +283,5 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 
 // timestamp returns a timestamp in milliseconds.
 func timestamp() int64 {
-	return time.Now().Unix() / int64(time.Millisecond)
+	return time.Now().UnixNano() / int64(time.Millisecond)
 }
