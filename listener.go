@@ -191,7 +191,11 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		case idOpenConnectionRequest2:
 			return listener.handleOpenConnectionRequest2(b, addr)
 		default:
-			return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
+			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
+			// this case, we should not print an error.
+			if packetID&bitFlagValid == 0 {
+				return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
+			}
 		}
 	}
 	return conn.receive(b)
