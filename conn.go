@@ -22,7 +22,7 @@ const (
 	resendRequestThreshold = 10
 	// tickInterval is the interval at which the connection sends a ping to the other side to measure latency
 	// between both ends, and at which ACK packets are sent.
-	tickInterval = time.Second / 20
+	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = 4
 )
