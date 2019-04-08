@@ -20,9 +20,9 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
-	// pingInterval is the interval at which the connection sends a ping to the other side to measure latency
-	// between both ends.
-	pingInterval = time.Second * 4
+	// tickInterval is the interval at which the connection sends a ping to the other side to measure latency
+	// between both ends, and at which ACK packets are sent.
+	tickInterval = time.Second / 20
 )
 
 var (
@@ -76,6 +76,9 @@ type Conn struct {
 	// datagramRecvQueue is an ordered queue used to track which datagrams were received and which datagrams
 	// were missing, so that we can send NACKs to request missing datagrams.
 	datagramRecvQueue *orderedQueue
+	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
+	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
+	datagramsReceived []uint32
 	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
 	missingDatagramTimes int
 
@@ -115,26 +118,37 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		lastPacketTime:    time.Now(),
 	}
 	go func() {
-		ticker := time.NewTicker(pingInterval)
+		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				// First we send a connected ping to the other end of the connection so that it knows we
-				// haven't timed out.
-				packet := &connectedPing{PingTimestamp: timestamp()}
-				b := bytes.NewBuffer([]byte{idConnectedPing})
-				_ = binary.Write(b, binary.BigEndian, packet)
-				if _, err := c.Write(b.Bytes()); err != nil {
-					return
+			case t := <-ticker.C:
+				if t.Unix()%5 == 0 {
+					// First we send a connected ping to the other end of the connection so that it knows we
+					// haven't timed out, every fifth tick.
+					packet := &connectedPing{PingTimestamp: timestamp()}
+					b := bytes.NewBuffer([]byte{idConnectedPing})
+					_ = binary.Write(b, binary.BigEndian, packet)
+					if _, err := c.Write(b.Bytes()); err != nil {
+						return
+					}
+				}
+				if len(c.datagramsReceived) > 0 {
+					// Write an ACK packet to the connection containing all datagram sequence numbers that we
+					// received since the last tick.
+					if err := c.sendACK(c.datagramsReceived...); err != nil {
+						return
+					}
+					c.datagramsReceived = nil
 				}
 
 				// After that, we check if the other end has actually timed out. If so, we close the conn, as
 				// it is likely the client was disconnected.
-				if time.Now().Sub(c.lastPacketTime) > connTimeout {
+				if t.Sub(c.lastPacketTime) > connTimeout {
 					// If the timeout was long enough, we close the conn.
 					_ = c.Close()
 				}
+
 			case <-c.close:
 				// Put a new boolean in the close channel to make sure other receivers also get it.
 				c.close <- true
@@ -346,9 +360,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
-	if err := conn.sendACK(sequenceNumber); err != nil {
-		return fmt.Errorf("error handing datagram: %v", err)
-	}
+	conn.datagramsReceived = append(conn.datagramsReceived, sequenceNumber)
 	if err := conn.datagramRecvQueue.put(sequenceNumber, true); err != nil {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}
