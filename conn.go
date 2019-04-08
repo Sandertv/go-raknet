@@ -20,6 +20,9 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
+	// pingInterval is the interval at which the connection sends a ping to the other side to measure latency
+	// between both ends.
+	pingInterval = time.Second * 4
 )
 
 var (
@@ -61,6 +64,10 @@ type Conn struct {
 	// mtuSize is the MTU size of the connection. Packets longer than this size must be split into fragments
 	// for them to arrive at the client without losing bytes.
 	mtuSize int16
+
+	// latency is the last measured latency between both ends of the connection. Note that this latency is
+	// not the round-trip time, but half of that.
+	latency int
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
@@ -108,7 +115,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		lastPacketTime:    time.Now(),
 	}
 	go func() {
-		ticker := time.NewTicker(time.Second * 4)
+		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -261,6 +268,13 @@ func (conn *Conn) MaxPacketSize() int {
 	return int(conn.mtuSize) * 128
 }
 
+// Latency returns the last measured latency between both ends of the connection in milliseconds. The latency
+// is updated every 4 seconds. The latency returned is the time it takes to send one packet from one end to
+// the other end of the connection. It is not the round-trip time.
+func (conn *Conn) Latency() int {
+	return conn.latency
+}
+
 const (
 	// Datagram header +
 	// Datagram sequence number +
@@ -411,9 +425,9 @@ func (conn *Conn) handlePacket(b []byte) error {
 	case idConnectedPing:
 		return conn.handleConnectedPing(buffer)
 	case idConnectedPong:
-		return nil
+		return conn.handleConnectedPong(buffer)
 	case idDisconnectNotification:
-		//return conn.Close()
+		return conn.Close()
 	default:
 		if err := buffer.UnreadByte(); err != nil {
 			return fmt.Errorf("error unreading custom packet ID: %v", err)
@@ -446,6 +460,24 @@ func (conn *Conn) handleConnectedPing(b *bytes.Buffer) error {
 	if _, err := conn.Write(b.Bytes()); err != nil {
 		return fmt.Errorf("error sending connected pong: %v", err)
 	}
+	return nil
+}
+
+// handleConnectedPong handles a connected pong packet inside of buffer b. An error is returned if the packet
+// was invalid.
+func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
+	packet := &connectedPong{}
+	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+		return fmt.Errorf("error reading connected pong: %v", err)
+	}
+	now := timestamp()
+	if packet.PingTimestamp > now {
+		return fmt.Errorf("error measuring latency: ping timestamp is in the future")
+	}
+	// We measure the latency for a single packet from one end to another, not the round-trip time, so we
+	// divide the total time by 2.
+	conn.latency = int(now-packet.PingTimestamp) / 2
+
 	return nil
 }
 
