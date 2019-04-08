@@ -23,6 +23,8 @@ const (
 	// tickInterval is the interval at which the connection sends a ping to the other side to measure latency
 	// between both ends, and at which ACK packets are sent.
 	tickInterval = time.Second / 20
+	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
+	pingInterval = 4
 )
 
 var (
@@ -123,7 +125,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		for {
 			select {
 			case t := <-ticker.C:
-				if t.Unix()%5 == 0 {
+				if t.Unix()%pingInterval == 0 {
 					// First we send a connected ping to the other end of the connection so that it knows we
 					// haven't timed out, every fifth tick.
 					packet := &connectedPing{PingTimestamp: timestamp()}
