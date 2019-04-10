@@ -34,16 +34,20 @@ type Listener struct {
 	// pongData is a byte slice of data that is sent in an unconnected pong packet each time the client sends
 	// and unconnected ping to the server.
 	pongData atomic.Value
+
+	// protocol is the RakNet protocol of the listener.
+	protocol byte
 }
 
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
 // successful, an error is returned.
 // The address follows the same rules as those defined in the net.TCPListen() function.
-func Listen(address string) (*Listener, error) {
+func Listen(address string, settings ...Setting) (*Listener, error) {
 	conn, err := net.ListenPacket("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error creating UDP listener: %v", err)
 	}
+
 	// Seed the global rand so we can get a random ID.
 	rand.Seed(time.Now().Unix())
 	listener := &Listener{
@@ -52,7 +56,13 @@ func Listen(address string) (*Listener, error) {
 		connections: make(map[string]*Conn),
 		close:       make(chan bool, 1),
 		id:          rand.Int63(),
+		protocol:    MinecraftProtocol,
 	}
+	settingMap := mapSettings(settings)
+	if v, ok := settingMap[version]; ok {
+		listener.protocol = v.(byte)
+	}
+
 	listener.pongData.Store([]byte{})
 	go listener.listen()
 	return listener, nil
@@ -269,12 +279,17 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 	b.Reset()
 
 	pongData := listener.pongData.Load().([]byte)
-	response := &unconnectedPong{Magic: magic, ServerGUID: listener.id, SendTimestamp: timestamp(), DataLength: int16(len(pongData))}
+	response := &unconnectedPong{Magic: magic, ServerGUID: listener.id, SendTimestamp: timestamp()}
 	if err := b.WriteByte(idUnconnectedPong); err != nil {
 		return fmt.Errorf("error writing unconnected pong ID: %v", err)
 	}
 	if err := binary.Write(b, binary.BigEndian, response); err != nil {
 		return fmt.Errorf("error writing unconnected pong: %v", err)
+	}
+	if listener.protocol == MinecraftProtocol {
+		if err := binary.Write(b, binary.BigEndian, int16(len(pongData))); err != nil {
+			return fmt.Errorf("error writing unconnected pong data length")
+		}
 	}
 	if _, err := b.Write(pongData); err != nil {
 		return fmt.Errorf("error writing pong data to buffer: %v", err)

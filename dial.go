@@ -14,7 +14,7 @@ import (
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
-func Ping(address string) (response []byte, err error) {
+func Ping(address string, settings ...Setting) (response []byte, err error) {
 	conn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
@@ -51,9 +51,19 @@ func Ping(address string) (response []byte, err error) {
 		return nil, fmt.Errorf("response pong did not have unconnected pong ID")
 	}
 
+	settingMap := mapSettings(settings)
+	protocol := MinecraftProtocol
+	if v, ok := settingMap[version]; ok {
+		protocol = v.(byte)
+	}
+
 	pong := &unconnectedPong{}
 	if err := binary.Read(buffer, binary.BigEndian, pong); err != nil {
 		return nil, fmt.Errorf("error decoding unconnected pong: %v", err)
+	}
+	if protocol == MinecraftProtocol {
+		// Skip the length as we don't need it for reading.
+		_ = buffer.Next(2)
 	}
 	_ = conn.Close()
 	// The leftover of the packet will be the pong data returned which is specifically dedicated to the game
@@ -65,7 +75,8 @@ func Ping(address string) (response []byte, err error) {
 // or a hostname, combined with a port that is separated with ':'.
 // Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
 // connection will timeout and an error will be returned.
-func Dial(address string) (*Conn, error) {
+// Optionally, a variadic amount of settings may be passed into Dial to specify additional behaviour.
+func Dial(address string, settings ...Setting) (*Conn, error) {
 	udpConn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
@@ -78,7 +89,19 @@ func Dial(address string) (*Conn, error) {
 	rand.Seed(time.Now().Unix())
 	id := rand.Int63()
 
-	state := &connState{conn: udpConn, remoteAddr: udpConn.RemoteAddr(), discoveringMTUSize: 1492, id: id}
+	settingMap := mapSettings(settings)
+	protocol := MinecraftProtocol
+	if v, ok := settingMap[version]; ok {
+		protocol = v.(byte)
+	}
+
+	state := &connState{
+		conn:               udpConn,
+		remoteAddr:         udpConn.RemoteAddr(),
+		discoveringMTUSize: 1492,
+		id:                 id,
+		protocol:           protocol,
+	}
 	if err := state.discoverMTUSize(); err != nil {
 		return nil, fmt.Errorf("error discovering MTU size: %v", err)
 	}
@@ -148,10 +171,15 @@ func clientListen(rakConn *Conn, conn net.Conn) {
 	}
 }
 
+// connState represents a state of a connection before the connection is finalised. It holds some data
+// collected during the connection.
 type connState struct {
 	conn       net.Conn
 	remoteAddr net.Addr
 	id         int64
+
+	// protocol is the RakNet protocol version used by the connection state.
+	protocol byte
 
 	// mtuSize is the final MTU size found by sending open connection request 1 packets. It is the MTU size
 	// sent by the server.
@@ -274,7 +302,7 @@ func (state *connState) sendOpenConnectionRequest1() error {
 	if err := b.WriteByte(idOpenConnectionRequest1); err != nil {
 		return fmt.Errorf("error writing open connection request 1 ID: %v", err)
 	}
-	packet := &openConnectionRequest1{Magic: magic, Protocol: protocol}
+	packet := &openConnectionRequest1{Magic: magic, Protocol: state.protocol}
 	if err := binary.Write(b, binary.BigEndian, packet); err != nil {
 		return fmt.Errorf("error writing open connection request 1: %v", err)
 	}

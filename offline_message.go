@@ -31,7 +31,6 @@ type unconnectedPong struct {
 	SendTimestamp int64
 	ServerGUID    int64
 	Magic         [16]byte
-	DataLength    int16
 }
 
 type openConnectionRequest1 struct {

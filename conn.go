@@ -12,8 +12,12 @@ import (
 )
 
 const (
-	// protocol is the current RakNet protocol version. This is Minecraft specific.
-	protocol = 9
+	// MinecraftProtocol is the current default Minecraft RakNet protocol version. This is Minecraft specific.
+	// For the default RakNet, use OfficialProtocol.
+	MinecraftProtocol byte = 9
+	// OfficialProtocol is the protocol version of the official open source RakNet library.
+	OfficialProtocol byte = 6
+
 	// connTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
 	// duration.
 	connTimeout = time.Second * 7
