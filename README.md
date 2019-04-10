@@ -27,7 +27,7 @@ import (
 
 func main() {
 	// We start a listener with in this case a specific protocol.
-    listener, _ := raknet.Listen("0.0.0.0:19132", raknet.Version(raknet.OfficialProtocol))
+    listener, _ := raknet.Listen("0.0.0.0:19132", raknet.Protocol(raknet.OfficialProtocol))
     defer listener.Close()
     for {
         conn, _ := listener.Accept()

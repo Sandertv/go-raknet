@@ -4,9 +4,9 @@ const (
 	version = "version"
 )
 
-// Version returns a version setting using the protocol version passed. The setting may be passed into a
+// Protocol returns a version setting using the protocol version passed. The setting may be passed into a
 // raknet.Dial() or raknet.Listen() call.
-func Version(protocolVersion byte) Setting {
+func Protocol(protocolVersion byte) Setting {
 	return Setting{key: version, value: protocolVersion}
 }
 
