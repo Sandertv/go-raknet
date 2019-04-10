@@ -259,17 +259,23 @@ func (state *connState) discoverMTUSize() (err error) {
 		if readErr != nil {
 			return fmt.Errorf("error reading packet ID: %v", err)
 		}
-		if id != idOpenConnectionReply1 {
-			// We got a packet, but the packet was not an open connection reply 1 packet. We simply discard it
-			// and continue reading.
+		switch id {
+		case idOpenConnectionReply1:
+			response := &openConnectionReply1{}
+			if err := binary.Read(buffer, binary.BigEndian, response); err != nil {
+				return fmt.Errorf("error reading open connection reply 1: %v", err)
+			}
+			state.mtuSize = response.MTUSize
+			return
+		case idIncompatibleProtocolVersion:
+			response := &incompatibleProtocolVersion{}
+			if err := binary.Read(buffer, binary.BigEndian, response); err != nil {
+				return fmt.Errorf("error reading incompatible protocol version: %v", err)
+			}
+			return fmt.Errorf("error discovering MTU size: mismatched protocol: client protocol = %v, server protocol = %v", state.protocol, response.ServerProtocol)
+		default:
 			continue
 		}
-		response := &openConnectionReply1{}
-		if err := binary.Read(buffer, binary.BigEndian, response); err != nil {
-			return fmt.Errorf("error reading open connection reply 1: %v", err)
-		}
-		state.mtuSize = response.MTUSize
-		return
 	}
 }
 

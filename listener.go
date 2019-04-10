@@ -257,6 +257,20 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 	}
 	b.Reset()
 
+	if packet.Protocol != listener.protocol {
+		response := &incompatibleProtocolVersion{Magic: magic, ServerGUID: listener.id, ServerProtocol: listener.protocol}
+		if err := b.WriteByte(idIncompatibleProtocolVersion); err != nil {
+			return fmt.Errorf("error writing incompatible protocol version ID: %v", err)
+		}
+		if err := binary.Write(b, binary.BigEndian, response); err != nil {
+			return fmt.Errorf("error writing incompatible protocol version: %v", err)
+		}
+		if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
+			return fmt.Errorf("error sending incompatible protocol version: %v", err)
+		}
+		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, listener.protocol)
+	}
+
 	response := &openConnectionReply1{Magic: magic, ServerGUID: listener.id, MTUSize: int16(mtuSize) + 28}
 	if err := b.WriteByte(idOpenConnectionReply1); err != nil {
 		return fmt.Errorf("error writing open connection reply 1 ID: %v", err)

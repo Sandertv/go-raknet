@@ -45,6 +45,12 @@ type openConnectionReply1 struct {
 	MTUSize    int16
 }
 
+type incompatibleProtocolVersion struct {
+	ServerProtocol byte
+	Magic          [16]byte
+	ServerGUID     int64
+}
+
 type openConnectionRequest2 struct {
 	Magic         [16]byte
 	ServerAddress *rakAddr
