@@ -207,6 +207,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 				return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
 			}
 		}
+		return nil
 	}
 	return conn.receive(b)
 }
