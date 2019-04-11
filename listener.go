@@ -138,14 +138,18 @@ func (listener *Listener) HijackPong(address string) error {
 					// It's okay if these packets are lost sometimes. There's no need to log this.
 					continue
 				}
+				if string(data[:4]) == "MCPE" {
+					fragments := bytes.Split(data, []byte{';'})
 
-				fragments := bytes.Split(data, []byte{';'})
-				fragments = fragments[:9]
-				fragments[8] = []byte{}
-				fragments[7] = []byte("Proxy")
-				fragments[6] = []byte(strconv.Itoa(int(listener.id)))
+					fragments = fragments[:9]
+					fragments[6] = []byte(strconv.Itoa(int(listener.id)))
+					fragments[7] = []byte("Proxy")
+					fragments[8] = []byte{}
 
-				listener.PongData(bytes.Join(fragments, []byte{';'}))
+					listener.PongData(bytes.Join(fragments, []byte{';'}))
+				} else {
+					listener.PongData(data)
+				}
 			case <-listener.close:
 				// Add another value to the channel so that other listeners can listen for the closing of the
 				// listener too.
