@@ -347,7 +347,9 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
 	}
 	if headerFlags&bitFlagValid == 0 {
-		return fmt.Errorf("error processing datagram header: datagram does not have the valid bitflag set")
+		// Close the connection if a non-datagram packet was received. This is probably an offline message,
+		// meaning the connection ceased to exist.
+		return conn.Close()
 	}
 	switch {
 	case headerFlags&bitFlagACK != 0:
