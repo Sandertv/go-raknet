@@ -285,7 +285,7 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 // the MTU size (generally around 1400-1492) multiplied with 128: The maximum amount of fragments a packet may
 // be split into.
 func (conn *Conn) MaxPacketSize() int {
-	return int(conn.mtuSize) * 128
+	return int(conn.mtuSize-splitAdditionalSize-packetAdditionalSize) * 128
 }
 
 // Latency returns the last measured latency between both ends of the connection in milliseconds. The latency
