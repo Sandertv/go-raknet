@@ -16,7 +16,8 @@ import (
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
 // TCPListener in the net package.
 type Listener struct {
-	conn net.PacketConn
+	conn     net.PacketConn
+	settings []Setting
 
 	// incoming is a channel of incoming connections. Connections that end up in here will also end up in
 	// the connections map.
@@ -52,6 +53,7 @@ func Listen(address string, settings ...Setting) (*Listener, error) {
 	rand.Seed(time.Now().Unix())
 	listener := &Listener{
 		conn:        conn,
+		settings:    settings,
 		incoming:    make(chan *Conn, 128),
 		connections: make(map[string]*Conn),
 		close:       make(chan bool, 1),
@@ -123,6 +125,8 @@ func (listener *Listener) PongData(data []byte) {
 // If the address passed could not be resolved, an error is returned.
 // Calling HijackPong means that any current and future pong data set using listener.PongData is overwritten
 // each update.
+// A list of settings may be passed in to specify additional settings such as the protocol version for the
+// ping/pong.
 func (listener *Listener) HijackPong(address string) error {
 	if _, err := net.ResolveUDPAddr("udp", address); err != nil {
 		return fmt.Errorf("error resolving UDP address: %v", err)
@@ -133,7 +137,7 @@ func (listener *Listener) HijackPong(address string) error {
 		for {
 			select {
 			case <-ticker.C:
-				data, err := Ping(address)
+				data, err := Ping(address, listener.settings...)
 				if err != nil {
 					// It's okay if these packets are lost sometimes. There's no need to log this.
 					continue
