@@ -56,9 +56,9 @@ type Conn struct {
 	addr net.Addr
 
 	writeLock          sync.Mutex
-	sendSequenceNumber uint32
-	sendOrderIndex     uint32
-	sendMessageIndex   uint32
+	sendSequenceNumber uint24
+	sendOrderIndex     uint24
+	sendMessageIndex   uint24
 	sendSplitID        uint32
 
 	// finishedSequence is a channel that has a value submitted to it once the connection has finished the
@@ -84,7 +84,7 @@ type Conn struct {
 	datagramRecvQueue *orderedQueue
 	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
 	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
-	datagramsReceived []uint32
+	datagramsReceived []uint24
 	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
 	missingDatagramTimes int
 
@@ -632,7 +632,7 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 
 // sendACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
-func (conn *Conn) sendACK(packets ...uint32) error {
+func (conn *Conn) sendACK(packets ...uint24) error {
 	ack := &acknowledgement{packets: packets}
 	buffer := bytes.NewBuffer([]byte{bitFlagACK | bitFlagValid})
 	if err := ack.write(buffer); err != nil {
@@ -646,7 +646,7 @@ func (conn *Conn) sendACK(packets ...uint32) error {
 
 // sendNACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
-func (conn *Conn) sendNACK(packets ...uint32) error {
+func (conn *Conn) sendNACK(packets ...uint24) error {
 	ack := &acknowledgement{packets: packets}
 	buffer := bytes.NewBuffer([]byte{bitFlagNACK | bitFlagValid})
 	if err := ack.write(buffer); err != nil {

@@ -8,18 +8,18 @@ import (
 // that has been inserted with an index if all indices below that aren't also taken out.
 // orderedQueue is not safe for concurrent use.
 type orderedQueue struct {
-	queue        map[uint32]interface{}
-	lowestIndex  uint32
-	highestIndex uint32
+	queue        map[uint24]interface{}
+	lowestIndex  uint24
+	highestIndex uint24
 }
 
 // newOrderedQueue returns a new initialised ordered queue.
 func newOrderedQueue() *orderedQueue {
-	return &orderedQueue{queue: make(map[uint32]interface{})}
+	return &orderedQueue{queue: make(map[uint24]interface{})}
 }
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
-func (queue *orderedQueue) put(index uint32, value interface{}) error {
+func (queue *orderedQueue) put(index uint24, value interface{}) error {
 	if index < queue.lowestIndex {
 		return fmt.Errorf("cannot set value at index %v: already taken out", index)
 	}
@@ -35,7 +35,7 @@ func (queue *orderedQueue) put(index uint32, value interface{}) error {
 
 // take fetches a value from the index passed and removes the value from the queue. If the value was found, ok
 // is true.
-func (queue *orderedQueue) take(index uint32) (val interface{}, ok bool) {
+func (queue *orderedQueue) take(index uint24) (val interface{}, ok bool) {
 	val, ok = queue.queue[index]
 	delete(queue.queue, index)
 	return
@@ -44,7 +44,7 @@ func (queue *orderedQueue) take(index uint32) (val interface{}, ok bool) {
 // takeOut attempts to take out as many values from the ordered queue as possible. Upon encountering an index
 // that has no value yet, the function returns all values that it did find and takes them out.
 func (queue *orderedQueue) takeOut() (values []interface{}) {
-	var index uint32
+	var index uint24
 	for index = queue.lowestIndex; index < queue.highestIndex; index++ {
 		value, ok := queue.queue[index]
 		if !ok {
@@ -64,7 +64,7 @@ func (queue *orderedQueue) takeOut() (values []interface{}) {
 
 // missing returns a slice of all indices in the ordered queue that do not have a value in them yet. Upon
 // returning, it also treats these indices as if they were
-func (queue *orderedQueue) missing() (indices []uint32) {
+func (queue *orderedQueue) missing() (indices []uint24) {
 	for index := queue.lowestIndex; index < queue.highestIndex; index++ {
 		if _, ok := queue.queue[index]; !ok {
 			indices = append(indices, index)

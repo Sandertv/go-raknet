@@ -86,9 +86,9 @@ type packet struct {
 	reliability byte
 
 	content       []byte
-	messageIndex  uint32
-	sequenceIndex uint32
-	orderIndex    uint32
+	messageIndex  uint24
+	sequenceIndex uint24
+	orderIndex    uint24
 
 	split      bool
 	splitCount uint32
@@ -241,7 +241,7 @@ const (
 // acknowledgement is an acknowledgement packet that may either be an ACK or a NACK, depending on the purpose
 // that it is sent with.
 type acknowledgement struct {
-	packets []uint32
+	packets []uint24
 }
 
 // write writes an acknowledgement packet and returns an error if not successful.
@@ -255,8 +255,8 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 		return ack.packets[i] < ack.packets[j]
 	})
 
-	var firstPacketInRange uint32
-	var lastPacketInRange uint32
+	var firstPacketInRange uint24
+	var lastPacketInRange uint24
 	var recordCount int16 = 1
 
 	for index, packet := range ack.packets {
