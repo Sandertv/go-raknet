@@ -14,6 +14,7 @@ import (
 const (
 	// MinecraftProtocol is the current default Minecraft RakNet protocol version. This is Minecraft specific.
 	// For the default RakNet, use OfficialProtocol.
+	// MinecraftProtocol is the default in go-raknet.
 	MinecraftProtocol byte = 9
 	// OfficialProtocol is the protocol version of the official open source RakNet library.
 	OfficialProtocol byte = 6
