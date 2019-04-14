@@ -56,7 +56,12 @@ type Conn struct {
 	conn net.PacketConn
 	addr net.Addr
 
-	writeLock          sync.Mutex
+	writeLock   sync.Mutex
+	writeBuffer *bytes.Buffer
+
+	writePacket *packet
+	readPacket  *packet
+
 	sendSequenceNumber uint24
 	sendOrderIndex     uint24
 	sendMessageIndex   uint24
@@ -78,7 +83,7 @@ type Conn struct {
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
-	splits map[uint16][]*packet
+	splits map[uint16][][]byte
 
 	// datagramRecvQueue is an ordered queue used to track which datagrams were received and which datagrams
 	// were missing, so that we can send NACKs to request missing datagrams.
@@ -116,13 +121,16 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		mtuSize:           mtuSize,
 		id:                id,
 		finishedSequence:  make(chan bool),
-		splits:            make(map[uint16][]*packet),
+		splits:            make(map[uint16][][]byte),
 		datagramRecvQueue: newOrderedQueue(),
 		packetQueue:       newOrderedQueue(),
 		recoveryQueue:     newOrderedQueue(),
 		close:             make(chan bool, 1),
 		packetChan:        make(chan *bytes.Buffer, 128),
 		lastPacketTime:    time.Now(),
+		writeBuffer:       bytes.NewBuffer(nil),
+		writePacket:       &packet{},
+		readPacket:        &packet{},
 	}
 	go func() {
 		ticker := time.NewTicker(tickInterval)
@@ -146,7 +154,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 					if err := c.sendACK(c.datagramsReceived...); err != nil {
 						return
 					}
-					c.datagramsReceived = nil
+					c.datagramsReceived = c.datagramsReceived[:0]
 				}
 
 				// After that, we check if the other end has actually timed out. If so, we close the conn, as
@@ -183,7 +191,6 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 		splitID = uint16(conn.sendSplitID)
 		conn.sendSplitID++
 	}
-	buffer := bytes.NewBuffer(nil)
 	for splitIndex, content := range fragments {
 		sequenceNumber := conn.sendSequenceNumber
 		conn.sendSequenceNumber++
@@ -192,14 +199,19 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 
 		// We can reset the buffer so that we can re-use it for each fragment created when splitting the
 		// packet.
-		buffer.Reset()
-		if err := buffer.WriteByte(bitFlagValid); err != nil {
+		conn.writeBuffer.Reset()
+		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
 			return 0, fmt.Errorf("error writing datagram header: %v", err)
 		}
-		if err := writeUint24(buffer, sequenceNumber); err != nil {
+		if err := writeUint24(conn.writeBuffer, sequenceNumber); err != nil {
 			return 0, fmt.Errorf("error writing datagram sequence number: %v", err)
 		}
-		packet := &packet{reliability: reliabilityReliableOrdered, content: content, orderIndex: orderIndex, messageIndex: messageIndex}
+		packet := conn.writePacket
+		packet.reliability = reliabilityReliableOrdered
+		packet.content = content
+		packet.orderIndex = orderIndex
+		packet.messageIndex = messageIndex
+
 		if len(fragments) > 1 {
 			// If there were more than one fragment, the packet was split, so we need to make sure we set the
 			// appropriate fields.
@@ -207,12 +219,14 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			packet.splitCount = uint32(len(fragments))
 			packet.splitIndex = uint32(splitIndex)
 			packet.splitID = splitID
+		} else {
+			packet.split = false
 		}
-		if err := packet.write(buffer); err != nil {
+		if err := packet.write(conn.writeBuffer); err != nil {
 			return 0, fmt.Errorf("error writing packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(buffer.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
 			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// Finally we add the packet to the recovery queue.
@@ -286,7 +300,7 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 // the MTU size (generally around 1400-1492) multiplied with 128: The maximum amount of fragments a packet may
 // be split into.
 func (conn *Conn) MaxPacketSize() int {
-	return int(conn.mtuSize-splitAdditionalSize-packetAdditionalSize) * 128
+	return int(conn.mtuSize-splitAdditionalSize-packetAdditionalSize-28) * 128
 }
 
 // Latency returns the last measured latency between both ends of the connection in milliseconds. The latency
@@ -387,17 +401,16 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	}
 
 	for b.Len() > 6 {
-		packet := &packet{}
-		if err := packet.read(b); err != nil {
+		if err := conn.readPacket.read(b); err != nil {
 			return fmt.Errorf("error decoding datagram packet: %v", err)
 		}
-		if packet.split {
-			if err := conn.handleSplitPacket(packet); err != nil {
+		if conn.readPacket.split {
+			if err := conn.handleSplitPacket(conn.readPacket); err != nil {
 				return fmt.Errorf("error receiving split packet: %v", err)
 			}
 			continue
 		}
-		if err := conn.receivePacket(packet); err != nil {
+		if err := conn.receivePacket(conn.readPacket); err != nil {
 			return fmt.Errorf("error receiving packet: %v", err)
 		}
 	}
@@ -592,7 +605,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 func (conn *Conn) handleSplitPacket(p *packet) error {
 	m, ok := conn.splits[p.splitID]
 	if !ok {
-		m = make([]*packet, p.splitCount)
+		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
 	if p.splitIndex < 0 || p.splitIndex > uint32(len(m)-1) {
@@ -600,10 +613,10 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 		// invalid.
 		return fmt.Errorf("error handing split packet: split ID %v is out of range (0 - %v)", p.splitID, len(m)-1)
 	}
-	m[p.splitIndex] = p
+	m[p.splitIndex] = p.content
 
 	for _, splitPacket := range m {
-		if splitPacket == nil {
+		if len(splitPacket) == 0 {
 			// We haven't yet received all split fragments, so we cannot put the packets together yet.
 			return nil
 		}
@@ -612,15 +625,15 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 	totalSize := 0
 	for _, splitPacket := range m {
 		// First we calculate the total size required to hold the content of the combined content.
-		totalSize += len(splitPacket.content)
+		totalSize += len(splitPacket)
 	}
 	fullContent := make([]byte, totalSize)
 	currentOffset := 0
 	for _, splitPacket := range m {
 		// We finally copy the packet into our new full content slice and make sure it is copied at the
 		// correct offset.
-		contentLength := len(splitPacket.content)
-		if n := copy(fullContent[currentOffset:], splitPacket.content); n != contentLength {
+		contentLength := len(splitPacket)
+		if n := copy(fullContent[currentOffset:], splitPacket); n != contentLength {
 			panic(fmt.Sprintf("invalid length full split packet content byte slice produced: should have copied %v, but only copied %v", contentLength, n))
 		}
 		currentOffset += contentLength
