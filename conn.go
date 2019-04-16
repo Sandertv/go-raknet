@@ -129,7 +129,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		packetChan:        make(chan *bytes.Buffer, 128),
 		lastPacketTime:    time.Now(),
 		writeBuffer:       bytes.NewBuffer(nil),
-		writePacket:       &packet{},
+		writePacket:       &packet{reliability: reliabilityReliableOrdered},
 		readPacket:        &packet{},
 	}
 	go func() {
@@ -186,9 +186,8 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 	orderIndex := conn.sendOrderIndex
 	conn.sendOrderIndex++
 
-	var splitID uint16
+	splitID := uint16(conn.sendSplitID)
 	if len(fragments) > 1 {
-		splitID = uint16(conn.sendSplitID)
 		conn.sendSplitID++
 	}
 	for splitIndex, content := range fragments {
@@ -197,8 +196,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 		messageIndex := conn.sendMessageIndex
 		conn.sendMessageIndex++
 
-		// We can reset the buffer so that we can re-use it for each fragment created when splitting the
-		// packet.
+		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
 		conn.writeBuffer.Reset()
 		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
 			return 0, fmt.Errorf("error writing datagram header: %v", err)
@@ -207,7 +205,6 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error writing datagram sequence number: %v", err)
 		}
 		packet := conn.writePacket
-		packet.reliability = reliabilityReliableOrdered
 		packet.content = content
 		packet.orderIndex = orderIndex
 		packet.messageIndex = messageIndex
@@ -230,7 +227,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// Finally we add the packet to the recovery queue.
-		_ = conn.recoveryQueue.put(sequenceNumber, packet)
+		_ = conn.recoveryQueue.put(sequenceNumber, *packet)
 		n += len(content)
 	}
 	return
@@ -699,13 +696,15 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 	if err := nack.read(b); err != nil {
 		return fmt.Errorf("error reading NACK: %v", err)
 	}
+	buffer := bytes.NewBuffer(nil)
 	for _, sequenceNumber := range nack.packets {
 		val, ok := conn.recoveryQueue.take(sequenceNumber)
 		if !ok {
 			return fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
 		}
-		packet := val.(*packet)
-		buffer := bytes.NewBuffer(nil)
+		packet := val.(packet)
+
+		buffer.Reset()
 
 		// We first write a new datagram header using a new send sequence number that we find.
 		if err := buffer.WriteByte(bitFlagValid); err != nil {
@@ -717,7 +716,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 			return fmt.Errorf("error writing recovered datagram sequence number: %v", err)
 		}
 
-		if err := packet.write(buffer); err != nil {
+		if err := (&packet).write(buffer); err != nil {
 			return fmt.Errorf("error writing recovered packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
