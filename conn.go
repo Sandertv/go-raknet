@@ -293,13 +293,6 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 	return conn.SetReadDeadline(t)
 }
 
-// MaxPacketSize returns the maximum packet size that may be sent and received over the connection. This is
-// the MTU size (generally around 1400-1492) multiplied with 128: The maximum amount of fragments a packet may
-// be split into.
-func (conn *Conn) MaxPacketSize() int {
-	return int(conn.mtuSize-splitAdditionalSize-packetAdditionalSize-28) * 128
-}
-
 // Latency returns the last measured latency between both ends of the connection in milliseconds. The latency
 // is updated every 4 seconds. The latency returned is the time it takes to send one packet from one end to
 // the other end of the connection. It is not the round-trip time.

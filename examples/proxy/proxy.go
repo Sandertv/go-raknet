@@ -30,7 +30,7 @@ func main() {
 			panic(err)
 		}
 		go func() {
-			b := make([]byte, conn.MaxPacketSize())
+			b := make([]byte, 300000)
 			for {
 				n, err := conn.Read(b)
 				if err != nil {
@@ -51,7 +51,7 @@ func main() {
 			}
 		}()
 		go func() {
-			b := make([]byte, conn.MaxPacketSize())
+			b := make([]byte, 300000)
 			for {
 				n, err := server.Read(b)
 				if err != nil {
