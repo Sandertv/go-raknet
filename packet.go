@@ -246,20 +246,21 @@ type acknowledgement struct {
 
 // write writes an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) write(b *bytes.Buffer) error {
-	if len(ack.packets) == 0 {
+	packets := ack.packets
+	if len(packets) == 0 {
 		return b.WriteByte(0)
 	}
 	buffer := bytes.NewBuffer(nil)
 	// Sort packets before encoding to ensure packets are encoded correctly.
-	sort.Slice(ack.packets, func(i, j int) bool {
-		return ack.packets[i] < ack.packets[j]
+	sort.Slice(packets, func(i, j int) bool {
+		return packets[i] < packets[j]
 	})
 
 	var firstPacketInRange uint24
 	var lastPacketInRange uint24
 	var recordCount int16 = 1
 
-	for index, packet := range ack.packets {
+	for index, packet := range packets {
 		if index == 0 {
 			// The first packet, set the first and last packet to it.
 			firstPacketInRange = packet

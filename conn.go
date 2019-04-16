@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -90,7 +91,7 @@ type Conn struct {
 	datagramRecvQueue *orderedQueue
 	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
 	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
-	datagramsReceived []uint24
+	datagramsReceived atomic.Value
 	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
 	missingDatagramTimes int
 
@@ -100,7 +101,7 @@ type Conn struct {
 	// consumes a value from this channel.
 	packetChan chan *bytes.Buffer
 	// lastPacketTime is the last time a packet was
-	lastPacketTime time.Time
+	lastPacketTime atomic.Value
 
 	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
 	recoveryQueue *orderedQueue
@@ -127,11 +128,12 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		recoveryQueue:     newOrderedQueue(),
 		close:             make(chan bool, 1),
 		packetChan:        make(chan *bytes.Buffer, 128),
-		lastPacketTime:    time.Now(),
 		writeBuffer:       bytes.NewBuffer(nil),
 		writePacket:       &packet{reliability: reliabilityReliableOrdered},
 		readPacket:        &packet{},
 	}
+	c.lastPacketTime.Store(time.Now())
+	c.datagramsReceived.Store([]uint24{})
 	go func() {
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
@@ -148,18 +150,19 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 						return
 					}
 				}
-				if len(c.datagramsReceived) > 0 {
+				received := c.datagramsReceived.Load().([]uint24)
+				if len(received) > 0 {
 					// Write an ACK packet to the connection containing all datagram sequence numbers that we
 					// received since the last tick.
-					if err := c.sendACK(c.datagramsReceived...); err != nil {
+					if err := c.sendACK(received...); err != nil {
 						return
 					}
-					c.datagramsReceived = c.datagramsReceived[:0]
+					c.datagramsReceived.Store(received[:0])
 				}
 
 				// After that, we check if the other end has actually timed out. If so, we close the conn, as
 				// it is likely the client was disconnected.
-				if t.Sub(c.lastPacketTime) > connTimeout {
+				if t.Sub(c.lastPacketTime.Load().(time.Time)) > connTimeout {
 					// If the timeout was long enough, we close the conn.
 					_ = c.Close()
 				}
@@ -240,7 +243,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case packet := <-conn.packetChan:
-		conn.lastPacketTime = time.Now()
+		conn.lastPacketTime.Store(time.Now())
 		if len(b) < packet.Len() {
 			err = fmt.Errorf("raknet.Conn read: read raknet: A message sent on a RakNet socket was larger than the buffer used to receive the message into")
 		}
@@ -382,7 +385,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
-	conn.datagramsReceived = append(conn.datagramsReceived, sequenceNumber)
+	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
 	if err := conn.datagramRecvQueue.put(sequenceNumber, true); err != nil {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}

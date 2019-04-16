@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -24,7 +25,7 @@ type Listener struct {
 	incoming chan *Conn
 
 	// connections is a map of currently active connections, indexed by their address.
-	connections map[string]*Conn
+	connections sync.Map
 
 	close chan bool
 
@@ -52,13 +53,12 @@ func Listen(address string, settings ...Setting) (*Listener, error) {
 	// Seed the global rand so we can get a random ID.
 	rand.Seed(time.Now().Unix())
 	listener := &Listener{
-		conn:        conn,
-		settings:    settings,
-		incoming:    make(chan *Conn, 128),
-		connections: make(map[string]*Conn),
-		close:       make(chan bool, 1),
-		id:          rand.Int63(),
-		protocol:    MinecraftProtocol,
+		conn:     conn,
+		settings: settings,
+		incoming: make(chan *Conn, 128),
+		close:    make(chan bool, 1),
+		id:       rand.Int63(),
+		protocol: MinecraftProtocol,
 	}
 	settingMap := mapSettings(settings)
 	if v, ok := settingMap[version]; ok {
@@ -85,7 +85,7 @@ func (listener *Listener) Accept() (*Conn, error) {
 			// Insert the boolean back in the channel so that other readers of the channel also receive
 			// the signal.
 			conn.close <- true
-			delete(listener.connections, conn.addr.String())
+			listener.connections.Delete(conn.addr.String())
 		}()
 		return conn, nil
 	case <-time.After(time.Second * 5):
@@ -98,10 +98,16 @@ func (listener *Listener) Accept() (*Conn, error) {
 // packets is able to be freed.
 func (listener *Listener) Close() error {
 	listener.close <- true
-	for _, conn := range listener.connections {
-		if err := conn.Close(); err != nil {
-			return fmt.Errorf("error closing conn %v: %v", conn.addr, err)
+	var err error
+	listener.connections.Range(func(key, value interface{}) bool {
+		conn := value.(*Conn)
+		if closeErr := conn.Close(); err != nil {
+			err = fmt.Errorf("error closing conn %v: %v", conn.addr, closeErr)
 		}
+		return true
+	})
+	if err != nil {
+		return err
 	}
 	if err := listener.conn.Close(); err != nil {
 		return fmt.Errorf("error closing UDP listener: %v", err)
@@ -193,7 +199,7 @@ func (listener *Listener) listen() {
 // handle handles an incoming packet in buffer b from the address passed. If not successful, an error is
 // returned describing the issue.
 func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
-	conn, found := listener.connections[addr.String()]
+	value, found := listener.connections.Load(addr.String())
 	if !found {
 		// If there was no session yet, it means the packet is an offline message. It is not contained in a
 		// datagram.
@@ -217,6 +223,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		}
 		return nil
 	}
+	conn := value.(*Conn)
 	return conn.receive(b)
 }
 
@@ -246,7 +253,7 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 	}
 
 	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID)
-	listener.connections[addr.String()] = conn
+	listener.connections.Store(addr.String(), conn)
 	// Add the connection to the incoming channel so that a caller of Accept() can receive it.
 	listener.incoming <- conn
 
