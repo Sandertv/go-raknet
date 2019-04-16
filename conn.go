@@ -204,7 +204,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 		if err := writeUint24(conn.writeBuffer, sequenceNumber); err != nil {
 			return 0, fmt.Errorf("error writing datagram sequence number: %v", err)
 		}
-		packet := conn.writePacket
+		packet := packetPool.Get().(*packet)
 		packet.content = content
 		packet.orderIndex = orderIndex
 		packet.messageIndex = messageIndex
@@ -227,7 +227,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// Finally we add the packet to the recovery queue.
-		_ = conn.recoveryQueue.put(sequenceNumber, *packet)
+		_ = conn.recoveryQueue.put(sequenceNumber, packet)
 		n += len(content)
 	}
 	return
@@ -305,6 +305,13 @@ func (conn *Conn) MaxPacketSize() int {
 // the other end of the connection. It is not the round-trip time.
 func (conn *Conn) Latency() int {
 	return conn.latency
+}
+
+// packetPool is a sync.Pool used to pool packets that encapsulate their content.
+var packetPool = sync.Pool{
+	New: func() interface{} {
+		return &packet{reliability: reliabilityReliableOrdered}
+	},
 }
 
 const (
@@ -681,7 +688,11 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	}
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
-		_, _ = conn.recoveryQueue.take(sequenceNumber)
+		packet, ok := conn.recoveryQueue.take(sequenceNumber)
+		if ok {
+			// Return the packet to the pool so that it may be re-used.
+			packetPool.Put(packet)
+		}
 	}
 	return nil
 }
@@ -702,7 +713,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 		if !ok {
 			return fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
 		}
-		packet := val.(packet)
+		packet := val.(*packet)
 
 		buffer.Reset()
 
@@ -716,7 +727,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 			return fmt.Errorf("error writing recovered datagram sequence number: %v", err)
 		}
 
-		if err := (&packet).write(buffer); err != nil {
+		if err := packet.write(buffer); err != nil {
 			return fmt.Errorf("error writing recovered packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.

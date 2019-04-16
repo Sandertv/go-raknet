@@ -44,7 +44,9 @@ func Ping(address string, settings ...Setting) (response []byte, err error) {
 	}
 
 	// Decode the header byte and make sure it's actually correct.
-	buffer = bytes.NewBuffer(data)
+	buffer.Reset()
+
+	_, _ = buffer.Write(data)
 	if b, err := buffer.ReadByte(); err != nil {
 		return nil, fmt.Errorf("error reading unconnected pong ID: %v", err)
 	} else if b != idUnconnectedPong {
