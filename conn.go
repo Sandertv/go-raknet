@@ -688,10 +688,11 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	}
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
-		packet, ok := conn.recoveryQueue.take(sequenceNumber)
+		p, ok := conn.recoveryQueue.take(sequenceNumber)
 		if ok {
-			// Return the packet to the pool so that it may be re-used.
-			packetPool.Put(packet)
+			// Clear the packet and return it to the pool so that it may be re-used.
+			p.(*packet).content = nil
+			packetPool.Put(p)
 		}
 	}
 	return nil
