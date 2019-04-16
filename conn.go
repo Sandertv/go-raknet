@@ -241,7 +241,10 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case packet := <-conn.packetChan:
 		conn.lastPacketTime = time.Now()
-		return copy(b, packet.Bytes()), nil
+		if len(b) < packet.Len() {
+			err = fmt.Errorf("raknet.Conn read: read raknet: A message sent on a RakNet socket was larger than the buffer used to receive the message into")
+		}
+		return copy(b, packet.Bytes()), err
 	case <-conn.close:
 		conn.close <- true
 		return 0, errors.New(errConnectionClosed)
