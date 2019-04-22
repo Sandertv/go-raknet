@@ -43,16 +43,25 @@ var (
 // ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
 // connection was closed.
 func ErrConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
 	return strings.Contains(err.Error(), errConnectionClosed) || strings.Contains(err.Error(), errUseOfClosed)
 }
 
 // ErrReadTimeout checks if the error passed was an error caused by a timeout set when reading from the Conn.
 func ErrReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
 	return strings.Contains(err.Error(), errReadTimeout)
 }
 
 // ErrConnectionTimeout checks if the error passed was an error caused by a timeout during connection.
 func ErrConnectionTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
 	return strings.Contains(err.Error(), errConnectionTimeout)
 }
 
