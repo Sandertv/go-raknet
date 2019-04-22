@@ -16,6 +16,7 @@ import (
 
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
 // TCPListener in the net package.
+// Listener implements the net.Listener interface.
 type Listener struct {
 	conn     net.PacketConn
 	settings []Setting
@@ -73,7 +74,7 @@ func Listen(address string, settings ...Setting) (*Listener, error) {
 // Accept blocks until a connection can be accepted by the listener. If successful, Accept returns a
 // connection that is ready to send and receive data. If not successful, a nil listener is returned and an error
 // describing the problem.
-func (listener *Listener) Accept() (*Conn, error) {
+func (listener *Listener) Accept() (net.Conn, error) {
 	conn, ok := <-listener.incoming
 	if !ok {
 		return nil, fmt.Errorf("error accepting connection: listener closed")
@@ -92,6 +93,11 @@ func (listener *Listener) Accept() (*Conn, error) {
 		// It took too long to finish the connection sequence. We cancel and return an error instead.
 		return nil, fmt.Errorf("error accepting connection: timeout during connection sequence")
 	}
+}
+
+// Addr returns the address the Listener is bound to and listening for connections on.
+func (listener *Listener) Addr() net.Addr {
+	return listener.conn.LocalAddr()
 }
 
 // Close closes the listener so that it may be cleaned up. It makes sure the goroutine handling incoming

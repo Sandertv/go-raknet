@@ -32,7 +32,7 @@ func main() {
     for {
         conn, _ := listener.Accept()
         
-        b := make([]byte, conn.MaxPacketSize())
+        b := make([]byte, 1024*1024*512)
         _, _ = conn.Read(b)
         _, _ = conn.Write([]byte{1, 2, 3})
         
@@ -54,7 +54,7 @@ func main() {
     conn, _ := raknet.Dial("mco.mineplex.com:19132")
     defer conn.Close()
     
-    b := make([]byte, conn.MaxPacketSize())
+    b := make([]byte, 1024*1024*512)
     _, _ = conn.Write([]byte{1, 2, 3})
     _, _ = conn.Read(b)
 }
