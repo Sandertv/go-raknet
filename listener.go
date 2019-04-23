@@ -75,6 +75,7 @@ func Listen(address string, settings ...Setting) (*Listener, error) {
 // connection that is ready to send and receive data. If not successful, a nil listener is returned and an error
 // describing the problem.
 func (listener *Listener) Accept() (net.Conn, error) {
+accept:
 	conn, ok := <-listener.incoming
 	if !ok {
 		return nil, fmt.Errorf("error accepting connection: listener closed")
@@ -89,9 +90,10 @@ func (listener *Listener) Accept() (net.Conn, error) {
 			listener.connections.Delete(conn.addr.String())
 		}()
 		return conn, nil
-	case <-time.After(time.Second * 5):
-		// It took too long to finish the connection sequence. We cancel and return an error instead.
-		return nil, fmt.Errorf("error accepting connection: timeout during connection sequence")
+	case <-time.After(time.Second * 10):
+		// It took too long to complete this connection. We close it and go back to accepting.
+		_ = conn.Close()
+		goto accept
 	}
 }
 

@@ -34,10 +34,9 @@ const (
 )
 
 var (
-	errConnectionClosed  = "error reading from conn: connection closed"
-	errUseOfClosed       = "use of closed network connection"
-	errReadTimeout       = "error reading from conn: read timeout"
-	errConnectionTimeout = "timeout during connection sequence"
+	errConnectionClosed = "error reading from conn: connection closed"
+	errUseOfClosed      = "use of closed network connection"
+	errReadTimeout      = "error reading from conn: read timeout"
 )
 
 // ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
@@ -55,14 +54,6 @@ func ErrReadTimeout(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), errReadTimeout)
-}
-
-// ErrConnectionTimeout checks if the error passed was an error caused by a timeout during connection.
-func ErrConnectionTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), errConnectionTimeout)
 }
 
 // Conn represents a connection to a specific client. It is not a real connection, as UDP is connectionless,
