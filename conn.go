@@ -249,7 +249,6 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case packet := <-conn.packetChan:
-		conn.lastPacketTime.Store(time.Now())
 		if len(b) < packet.Len() {
 			err = fmt.Errorf("raknet.Conn read: read raknet: A message sent on a RakNet socket was larger than the buffer used to receive the message into")
 		}
@@ -461,6 +460,10 @@ func (conn *Conn) handlePacket(b []byte) error {
 	if err != nil {
 		return fmt.Errorf("error reading packet ID: %v", err)
 	}
+
+	// Update the last time we received a packet so that the connection doesn't time out.
+	conn.lastPacketTime.Store(time.Now())
+
 	switch header {
 	case idConnectionRequest:
 		return conn.handleConnectionRequest(buffer)
