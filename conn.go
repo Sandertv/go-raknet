@@ -264,6 +264,10 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
 func (conn *Conn) Close() error {
+	if len(conn.close) != 0 {
+		// The connection was already closed, don't do anything.
+		return nil
+	}
 	conn.close <- true
 	return nil
 }
