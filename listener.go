@@ -105,6 +105,10 @@ func (listener *Listener) Addr() net.Addr {
 // Close closes the listener so that it may be cleaned up. It makes sure the goroutine handling incoming
 // packets is able to be freed.
 func (listener *Listener) Close() error {
+	if len(listener.close) != 0 {
+		// The listener was already closed, no need to do it again.
+		return nil
+	}
 	listener.close <- true
 	var err error
 	listener.connections.Range(func(key, value interface{}) bool {
