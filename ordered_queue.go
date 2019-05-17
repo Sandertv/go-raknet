@@ -63,7 +63,8 @@ func (queue *orderedQueue) takeOut() (values []interface{}) {
 }
 
 // missing returns a slice of all indices in the ordered queue that do not have a value in them yet. Upon
-// returning, it also treats these indices as if they were
+// returning, it also treats these indices as if they were filled out, meaning the next call to takeOut will
+// be successful.
 func (queue *orderedQueue) missing() (indices []uint24) {
 	for index := queue.lowestIndex; index < queue.highestIndex; index++ {
 		if _, ok := queue.queue[index]; !ok {

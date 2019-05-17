@@ -66,8 +66,7 @@ type Conn struct {
 	writeLock   sync.Mutex
 	writeBuffer *bytes.Buffer
 
-	writePacket *packet
-	readPacket  *packet
+	readPacket *packet
 
 	sendSequenceNumber uint24
 	sendOrderIndex     uint24
@@ -106,7 +105,8 @@ type Conn struct {
 	// packetChan is a channel containing content of packets that were fully processed. Calling Conn.Read()
 	// consumes a value from this channel.
 	packetChan chan *bytes.Buffer
-	// lastPacketTime is the last time a packet was
+	// lastPacketTime is the last time a packet was received. It is used to measure the time until the
+	// connection times out.
 	lastPacketTime atomic.Value
 
 	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
@@ -133,9 +133,8 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		packetQueue:       newOrderedQueue(),
 		recoveryQueue:     newOrderedQueue(),
 		close:             make(chan bool, 1),
-		packetChan:        make(chan *bytes.Buffer, 128),
+		packetChan:        make(chan *bytes.Buffer),
 		writeBuffer:       bytes.NewBuffer(nil),
-		writePacket:       &packet{reliability: reliabilityReliableOrdered},
 		readPacket:        &packet{},
 	}
 	c.lastPacketTime.Store(time.Now())
@@ -205,8 +204,6 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 		messageIndex := conn.sendMessageIndex
 		conn.sendMessageIndex++
 
-		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
-		conn.writeBuffer.Reset()
 		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
 			return 0, fmt.Errorf("error writing datagram header: %v", err)
 		}
@@ -235,6 +232,9 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
 			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
+		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
+		conn.writeBuffer.Reset()
+
 		// Finally we add the packet to the recovery queue.
 		_ = conn.recoveryQueue.put(sequenceNumber, packet)
 		n += len(content)
@@ -354,14 +354,11 @@ func (conn *Conn) split(b []byte) [][]byte {
 		fragmentCount++
 	}
 	fragments := make([][]byte, fragmentCount)
+
+	buf := bytes.NewBuffer(b)
 	for i := 0; i < fragmentCount; i++ {
-		if i == fragmentCount-1 {
-			// We've reached the last fragment. The last fragment exists out of the remaining buffer.
-			fragments[i] = b[i*maxSize:]
-			break
-		}
 		// Take a piece out of the content with the size of maxSize.
-		fragments[i] = b[i*maxSize : i*maxSize+maxSize]
+		fragments[i] = buf.Next(maxSize)
 	}
 	return fragments
 }
@@ -399,7 +396,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}
 	if len(conn.datagramRecvQueue.takeOut()) == 0 {
-		// We couldn't take any datagram, out of the receive queue, meaning we are missing a datagram. We
+		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
 		// increment the counter, and if it exceeds the threshold we send a NACK to request again.
 		conn.missingDatagramTimes++
 		if conn.missingDatagramTimes >= resendRequestThreshold {
@@ -410,9 +407,11 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 			// as datagrams that we will receive again will have a different sequence number.
 			conn.datagramRecvQueue.takeOut()
 		}
+	} else {
+		conn.missingDatagramTimes = 0
 	}
 
-	for b.Len() > 6 {
+	for b.Len() > 0 {
 		if err := conn.readPacket.read(b); err != nil {
 			return fmt.Errorf("error decoding datagram packet: %v", err)
 		}
@@ -624,7 +623,7 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
-	if p.splitIndex < 0 || p.splitIndex > uint32(len(m)-1) {
+	if p.splitIndex > uint32(len(m)-1) {
 		// The split index was either negative or was bigger than the slice size, meaning the packet is
 		// invalid.
 		return fmt.Errorf("error handing split packet: split ID %v is out of range (0 - %v)", p.splitID, len(m)-1)
@@ -720,7 +719,6 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 	if err := nack.read(b); err != nil {
 		return fmt.Errorf("error reading NACK: %v", err)
 	}
-	buffer := bytes.NewBuffer(nil)
 	for _, sequenceNumber := range nack.packets {
 		val, ok := conn.recoveryQueue.take(sequenceNumber)
 		if !ok {
@@ -728,28 +726,27 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 		}
 		packet := val.(*packet)
 
-		buffer.Reset()
-
 		// We first write a new datagram header using a new send sequence number that we find.
-		if err := buffer.WriteByte(bitFlagValid); err != nil {
+		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
 			return fmt.Errorf("error writing recovered datagram header: %v", err)
 		}
 		sequenceNumber := conn.sendSequenceNumber
 		conn.sendSequenceNumber++
-		if err := writeUint24(buffer, sequenceNumber); err != nil {
+		if err := writeUint24(conn.writeBuffer, sequenceNumber); err != nil {
 			return fmt.Errorf("error writing recovered datagram sequence number: %v", err)
 		}
 
-		if err := packet.write(buffer); err != nil {
+		if err := packet.write(conn.writeBuffer); err != nil {
 			return fmt.Errorf("error writing recovered packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(buffer.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
 			return fmt.Errorf("error sending recovered packet to addr %v: %v", conn.addr, err)
 		}
 		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
 		_ = conn.recoveryQueue.put(sequenceNumber, packet)
+		conn.writeBuffer.Reset()
 	}
 	return nil
 }
