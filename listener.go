@@ -163,6 +163,10 @@ func (listener *Listener) HijackPong(address string) error {
 				}
 				if string(data[:4]) == "MCPE" {
 					fragments := bytes.Split(data, []byte{';'})
+					for len(fragments) < 9 {
+						// Append to the fragments if it's not at least 9 elements long.
+						fragments = append(fragments, nil)
+					}
 
 					fragments = fragments[:9]
 					fragments[6] = []byte(strconv.Itoa(int(listener.id)))
