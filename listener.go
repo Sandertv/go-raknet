@@ -188,6 +188,12 @@ func (listener *Listener) HijackPong(address string) error {
 	return nil
 }
 
+// ID returns the unique ID of the listener. This ID is usually used by a client to identify a specific
+// server during a single session.
+func (listener *Listener) ID() int64 {
+	return listener.id
+}
+
 // listen continuously reads from the listener's UDP connection, until close has a value in it.
 func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
