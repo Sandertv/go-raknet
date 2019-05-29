@@ -211,7 +211,14 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error writing datagram sequence number: %v", err)
 		}
 		packet := packetPool.Get().(*packet)
-		packet.content = content
+		if cap(packet.content) < len(content) {
+			packet.content = make([]byte, len(content))
+		}
+		// We set the actual slice size to the same size as the content. It might be bigger than the previous
+		// size, in which case it will grow, which is fine as the underlying array will always be big enough.
+		packet.content = packet.content[:len(content)]
+		copy(packet.content, content)
+
 		packet.orderIndex = orderIndex
 		packet.messageIndex = messageIndex
 
