@@ -122,6 +122,9 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address passed.
 func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn {
+	if mtuSize < 500 {
+		mtuSize = 500
+	}
 	c := &Conn{
 		addr:              addr,
 		conn:              conn,
