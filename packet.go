@@ -248,7 +248,7 @@ type acknowledgement struct {
 func (ack *acknowledgement) write(b *bytes.Buffer) error {
 	packets := ack.packets
 	if len(packets) == 0 {
-		return b.WriteByte(0)
+		return binary.Write(b, binary.BigEndian, int16(0))
 	}
 	buffer := bytes.NewBuffer(nil)
 	// Sort packets before encoding to ensure packets are encoded correctly.
@@ -258,7 +258,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 
 	var firstPacketInRange uint24
 	var lastPacketInRange uint24
-	var recordCount int16 = 1
+	var recordCount int16
 
 	for index, packet := range packets {
 		if index == 0 {
@@ -327,6 +327,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 			return err
 		}
 	}
+	recordCount++
 	if err := binary.Write(b, binary.BigEndian, recordCount); err != nil {
 		return err
 	}

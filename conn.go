@@ -398,10 +398,10 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
-	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
 	if err := conn.datagramRecvQueue.put(sequenceNumber, true); err != nil {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}
+	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
 	if len(conn.datagramRecvQueue.takeOut()) == 0 {
 		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
 		// increment the counter, and if it exceeds the threshold we send a NACK to request again.
