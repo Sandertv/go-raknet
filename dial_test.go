@@ -5,7 +5,7 @@ import (
 )
 
 func TestDial(t *testing.T) {
-	data, err := Ping("mco.mineplex.com:19132")
+	data, err := Ping("mco.cubecraft.net:19132")
 	if err != nil {
 		t.Error(err)
 	}
@@ -13,7 +13,7 @@ func TestDial(t *testing.T) {
 		t.Errorf("invalid pong data received: expected the first bit to be MCPE, but got %v", string(data[:4]))
 	}
 
-	conn, err := Dial("mco.mineplex.com:19132")
+	conn, err := Dial("mco.cubecraft.net:19132")
 	if err != nil {
 		t.Error(err)
 	}

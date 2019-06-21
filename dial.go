@@ -194,13 +194,13 @@ type connState struct {
 
 // openConnectionRequest sends open connection request 2 packets continuously until it receives an open
 // connection reply 2 packet from the server.
-func (state *connState) openConnectionRequest() (err error) {
+func (state *connState) openConnectionRequest() (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			if sendErr := state.sendOpenConnectionRequest2(); err != nil {
-				err = sendErr
+			if err := state.sendOpenConnectionRequest2(); err != nil {
+				e = err
 				return
 			}
 		}
@@ -209,13 +209,13 @@ func (state *connState) openConnectionRequest() (err error) {
 	b := make([]byte, 128)
 	for {
 		// Start reading in a loop so that we can find open connection reply 2 packets.
-		n, readErr := state.conn.Read(b)
-		if readErr != nil {
+		n, err := state.conn.Read(b)
+		if err != nil {
 			return err
 		}
 		buffer := bytes.NewBuffer(b[:n])
-		id, readErr := buffer.ReadByte()
-		if readErr != nil {
+		id, err := buffer.ReadByte()
+		if err != nil {
 			return fmt.Errorf("error reading packet ID: %v", err)
 		}
 		if id != idOpenConnectionReply2 {
@@ -234,13 +234,13 @@ func (state *connState) openConnectionRequest() (err error) {
 
 // discoverMTUSize starts discovering an MTU size, the maximum packet size we can send, by sending multiple
 // open connection request 1 packets to the server with a decreasing MTU size padding.
-func (state *connState) discoverMTUSize() (err error) {
+func (state *connState) discoverMTUSize() (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			if sendErr := state.sendOpenConnectionRequest1(); err != nil {
-				err = sendErr
+			if err := state.sendOpenConnectionRequest1(); err != nil {
+				e = err
 				return
 			}
 			// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
@@ -252,13 +252,13 @@ func (state *connState) discoverMTUSize() (err error) {
 	b := make([]byte, 128)
 	for {
 		// Start reading in a loop so that we can find open connection reply 1 packets.
-		n, readErr := state.conn.Read(b)
-		if readErr != nil {
+		n, err := state.conn.Read(b)
+		if err != nil {
 			return err
 		}
 		buffer := bytes.NewBuffer(b[:n])
-		id, readErr := buffer.ReadByte()
-		if readErr != nil {
+		id, err := buffer.ReadByte()
+		if err != nil {
 			return fmt.Errorf("error reading packet ID: %v", err)
 		}
 		switch id {
@@ -266,6 +266,9 @@ func (state *connState) discoverMTUSize() (err error) {
 			response := &openConnectionReply1{}
 			if err := binary.Read(buffer, binary.BigEndian, response); err != nil {
 				return fmt.Errorf("error reading open connection reply 1: %v", err)
+			}
+			if response.MTUSize < 400 || response.MTUSize > 1500 {
+				return fmt.Errorf("invalid MTU size %v received in open connection reply 1", response.MTUSize)
 			}
 			state.mtuSize = response.MTUSize
 			return
@@ -275,8 +278,6 @@ func (state *connState) discoverMTUSize() (err error) {
 				return fmt.Errorf("error reading incompatible protocol version: %v", err)
 			}
 			return fmt.Errorf("error discovering MTU size: mismatched protocol: client protocol = %v, server protocol = %v", state.protocol, response.ServerProtocol)
-		default:
-			continue
 		}
 	}
 }
@@ -284,10 +285,7 @@ func (state *connState) discoverMTUSize() (err error) {
 // sendOpenConnectionRequest2 sends an open connection request 2 packet to the server. If not successful, an
 // error is returned.
 func (state *connState) sendOpenConnectionRequest2() error {
-	b := bytes.NewBuffer(nil)
-	if err := b.WriteByte(idOpenConnectionRequest2); err != nil {
-		return fmt.Errorf("error writing open connection request 2 ID: %v", err)
-	}
+	b := bytes.NewBuffer([]byte{idOpenConnectionRequest2})
 	addr := rakAddr(*state.remoteAddr.(*net.UDPAddr))
 	packet := &openConnectionRequest2{Magic: magic, ServerAddress: &addr, MTUSize: state.mtuSize, ClientGUID: state.id}
 	data, err := packet.MarshalBinary()
@@ -306,10 +304,7 @@ func (state *connState) sendOpenConnectionRequest2() error {
 // sendOpenConnectionRequest1 sends an open connection request 1 packet to the server. If not successful, an
 // error is returned.
 func (state *connState) sendOpenConnectionRequest1() error {
-	b := bytes.NewBuffer(nil)
-	if err := b.WriteByte(idOpenConnectionRequest1); err != nil {
-		return fmt.Errorf("error writing open connection request 1 ID: %v", err)
-	}
+	b := bytes.NewBuffer([]byte{idOpenConnectionRequest1})
 	packet := &openConnectionRequest1{Magic: magic, Protocol: state.protocol}
 	if err := binary.Write(b, binary.BigEndian, packet); err != nil {
 		return fmt.Errorf("error writing open connection request 1: %v", err)

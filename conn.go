@@ -765,7 +765,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 // An error occurs if the request was not successful.
 func (conn *Conn) requestConnection() error {
 	b := bytes.NewBuffer([]byte{idConnectionRequest})
-	packet := &connectionRequest{}
+	packet := &connectionRequest{ClientGUID: conn.id, RequestTimestamp: timestamp()}
 	if err := binary.Write(b, binary.BigEndian, packet); err != nil {
 		return fmt.Errorf("error writing connection request: %v", err)
 	}
