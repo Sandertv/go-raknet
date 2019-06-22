@@ -198,7 +198,12 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 	if time.Now().Sub(conn.recoveryQueue.LastClean()) > resendDelay {
 		// Datagrams we sent before have not been acknowledged for too long: We force these out again before
 		// sending the new one.
-		_ = conn.resend(conn.recoveryQueue.missing())
+		v := make([]uint24, 0, len(conn.recoveryQueue.queue))
+		for seqNum := range conn.recoveryQueue.queue {
+			v = append(v, seqNum)
+		}
+		_ = conn.resend(v)
+		conn.recoveryQueue.missing()
 		_ = conn.recoveryQueue.takeOut()
 	}
 	fragments := conn.split(b)
