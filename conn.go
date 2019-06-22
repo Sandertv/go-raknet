@@ -30,7 +30,7 @@ const (
 	// between both ends, and at which ACK packets are sent.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
-	pingInterval = 4
+	pingInterval = time.Second * 4
 )
 
 var (
@@ -144,20 +144,21 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 	c.datagramsReceived.Store([]uint24{})
 	go func() {
 		ticker := time.NewTicker(tickInterval)
+		pingTicker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
+		defer pingTicker.Stop()
 		for {
 			select {
-			case t := <-ticker.C:
-				if t.Unix()%pingInterval == 0 {
-					// First we send a connected ping to the other end of the connection so that it knows we
-					// haven't timed out, every fifth tick.
-					packet := &connectedPing{PingTimestamp: timestamp()}
-					b := bytes.NewBuffer([]byte{idConnectedPing})
-					_ = binary.Write(b, binary.BigEndian, packet)
-					if _, err := c.Write(b.Bytes()); err != nil {
-						return
-					}
+			case <-pingTicker.C:
+				// First we send a connected ping to the other end of the connection so that it knows we
+				// haven't timed out, every fifth tick.
+				packet := &connectedPing{PingTimestamp: timestamp()}
+				b := bytes.NewBuffer([]byte{idConnectedPing})
+				_ = binary.Write(b, binary.BigEndian, packet)
+				if _, err := c.Write(b.Bytes()); err != nil {
+					return
 				}
+			case t := <-ticker.C:
 				received := c.datagramsReceived.Load().([]uint24)
 				if len(received) > 0 {
 					// Write an ACK packet to the connection containing all datagram sequence numbers that we
