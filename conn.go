@@ -26,8 +26,7 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
-	// tickInterval is the interval at which the connection sends a ping to the other side to measure latency
-	// between both ends, and at which ACK packets are sent.
+	// tickInterval is the interval at which the connection sends an ACK containing the are sent.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = time.Second * 4
