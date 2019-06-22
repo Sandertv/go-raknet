@@ -26,9 +26,9 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
-	// resendDelay is the delay until which the connection will start resending packets that the other side
+	// minResendDelay is the delay until which the connection will start resending packets that the other side
 	// has not yet sent an ACK for.
-	resendDelay = time.Second / 40
+	minResendDelay = time.Millisecond * 10
 	// tickInterval is the interval at which the connection sends an ACK containing the are sent.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
@@ -195,17 +195,18 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	conn.writeLock.Lock()
 	defer conn.writeLock.Unlock()
-	if time.Now().Sub(conn.recoveryQueue.LastClean()) > resendDelay {
-		// Datagrams we sent before have not been acknowledged for too long: We force these out again before
-		// sending the new one.
-		v := make([]uint24, 0, len(conn.recoveryQueue.queue))
-		for seqNum := range conn.recoveryQueue.queue {
-			v = append(v, seqNum)
+
+	// Datagrams we sent before have not been acknowledged for too long: We force these out again before
+	// sending the new one.
+	delay := conn.resendDelay()
+	var resendSeqNums []uint24
+	for seqNum := range conn.recoveryQueue.queue {
+		if time.Now().Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
+			resendSeqNums = append(resendSeqNums, seqNum)
 		}
-		_ = conn.resend(v)
-		conn.recoveryQueue.missing()
-		_ = conn.recoveryQueue.takeOut()
 	}
+	_ = conn.resend(resendSeqNums)
+
 	fragments := conn.split(b)
 	orderIndex := conn.sendOrderIndex
 	conn.sendOrderIndex++
@@ -781,6 +782,11 @@ func (conn *Conn) resend(sequenceNumbers []uint24) error {
 		conn.writeBuffer.Reset()
 	}
 	return nil
+}
+
+// resendDelay returns the delay that a packet is expected to have at most using the current latency.
+func (conn *Conn) resendDelay() time.Duration {
+	return minResendDelay + time.Duration(conn.latency*2)*time.Millisecond
 }
 
 // requestConnection requests the connection from the server, provided this connection operates as a client.

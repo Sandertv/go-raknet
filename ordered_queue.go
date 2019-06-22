@@ -10,6 +10,7 @@ import (
 // orderedQueue is not safe for concurrent use.
 type orderedQueue struct {
 	queue        map[uint24]interface{}
+	timestamps   map[uint24]time.Time
 	lowestIndex  uint24
 	highestIndex uint24
 	lastClean    time.Time
@@ -17,7 +18,7 @@ type orderedQueue struct {
 
 // newOrderedQueue returns a new initialised ordered queue.
 func newOrderedQueue() *orderedQueue {
-	return &orderedQueue{queue: make(map[uint24]interface{}), lastClean: time.Now()}
+	return &orderedQueue{queue: make(map[uint24]interface{}), timestamps: make(map[uint24]time.Time)}
 }
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
@@ -32,9 +33,7 @@ func (queue *orderedQueue) put(index uint24, value interface{}) error {
 		queue.highestIndex = index + 1
 	}
 	queue.queue[index] = value
-	if len(queue.queue) == 1 {
-		queue.lastClean = time.Now()
-	}
+	queue.timestamps[index] = time.Now()
 	return nil
 }
 
@@ -43,6 +42,7 @@ func (queue *orderedQueue) put(index uint24, value interface{}) error {
 func (queue *orderedQueue) take(index uint24) (val interface{}, ok bool) {
 	val, ok = queue.queue[index]
 	delete(queue.queue, index)
+	delete(queue.timestamps, index)
 	return
 }
 
@@ -55,13 +55,13 @@ func (queue *orderedQueue) takeOut() (values []interface{}) {
 		if !ok {
 			break
 		}
+		delete(queue.queue, index)
+		delete(queue.timestamps, index)
 		if value == nil {
 			// Value was set by calling queue.missing(). This was a substitute value.
-			delete(queue.queue, index)
 			continue
 		}
 		values = append(values, value)
-		delete(queue.queue, index)
 	}
 	queue.lowestIndex = index
 	return
@@ -85,8 +85,8 @@ func (queue *orderedQueue) Len() int {
 	return len(queue.queue)
 }
 
-// LastClean returns the last time that the ordered queue was considered 'clean', meaning that it only had one
-// item put into it.
-func (queue *orderedQueue) LastClean() time.Time {
-	return queue.lastClean
+// Timestamp returns the a timestamp of the time that a packet with the sequence number passed arrived at in
+// the recovery queue. It panics if the sequence number doesn't exist.
+func (queue *orderedQueue) Timestamp(sequenceNumber uint24) time.Time {
+	return queue.timestamps[sequenceNumber]
 }
