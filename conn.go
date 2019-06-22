@@ -87,7 +87,7 @@ type Conn struct {
 
 	// latency is the last measured latency between both ends of the connection. Note that this latency is
 	// not the round-trip time, but half of that.
-	latency int
+	latency atomic.Value
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
@@ -142,6 +142,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		writeBuffer:       bytes.NewBuffer(nil),
 		readPacket:        &packet{},
 	}
+	c.latency.Store(10)
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
 	go func() {
@@ -336,7 +337,7 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 // is updated every 4 seconds. The latency returned is the time it takes to send one packet from one end to
 // the other end of the connection. It is not the round-trip time.
 func (conn *Conn) Latency() int {
-	return conn.latency
+	return conn.latency.Load().(int)
 }
 
 // packetPool is a sync.Pool used to pool packets that encapsulate their content.
@@ -552,7 +553,7 @@ func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
 	}
 	// We measure the latency for a single packet from one end to another, not the round-trip time, so we
 	// divide the total time by 2.
-	conn.latency = int(now-packet.PingTimestamp) / 2
+	conn.latency.Store(int(now-packet.PingTimestamp) / 2)
 
 	return nil
 }
@@ -786,7 +787,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) error {
 
 // resendDelay returns the delay that a packet is expected to have at most using the current latency.
 func (conn *Conn) resendDelay() time.Duration {
-	return minResendDelay + time.Duration(conn.latency*2)*time.Millisecond
+	return minResendDelay + time.Duration(conn.Latency()*2)*time.Millisecond
 }
 
 // requestConnection requests the connection from the server, provided this connection operates as a client.
