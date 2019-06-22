@@ -150,8 +150,8 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		for {
 			select {
 			case <-pingTicker.C:
-				// First we send a connected ping to the other end of the connection so that it knows we
-				// haven't timed out, every fifth tick.
+				// We send a connected ping every four seconds to calculate the latency and let the other side
+				// know we haven't timed out.
 				packet := &connectedPing{PingTimestamp: timestamp()}
 				b := bytes.NewBuffer([]byte{idConnectedPing})
 				_ = binary.Write(b, binary.BigEndian, packet)
