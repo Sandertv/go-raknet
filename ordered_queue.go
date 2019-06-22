@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"fmt"
+	"time"
 )
 
 // orderedQueue is a queue of byte slices that are taken out in an ordered way. No byte slice may be taken out
@@ -11,11 +12,12 @@ type orderedQueue struct {
 	queue        map[uint24]interface{}
 	lowestIndex  uint24
 	highestIndex uint24
+	lastClean    time.Time
 }
 
 // newOrderedQueue returns a new initialised ordered queue.
 func newOrderedQueue() *orderedQueue {
-	return &orderedQueue{queue: make(map[uint24]interface{})}
+	return &orderedQueue{queue: make(map[uint24]interface{}), lastClean: time.Now()}
 }
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
@@ -30,6 +32,9 @@ func (queue *orderedQueue) put(index uint24, value interface{}) error {
 		queue.highestIndex = index + 1
 	}
 	queue.queue[index] = value
+	if len(queue.queue) == 1 {
+		queue.lastClean = time.Now()
+	}
 	return nil
 }
 
@@ -78,4 +83,10 @@ func (queue *orderedQueue) missing() (indices []uint24) {
 // Len returns the amount of values in the ordered queue.
 func (queue *orderedQueue) Len() int {
 	return len(queue.queue)
+}
+
+// LastClean returns the last time that the ordered queue was considered 'clean', meaning that it only had one
+// item put into it.
+func (queue *orderedQueue) LastClean() time.Time {
+	return queue.lastClean
 }

@@ -26,6 +26,9 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
+	// resendDelay is the delay until which the connection will start resending packets that the other side
+	// has not yet sent an ACK for.
+	resendDelay = time.Second / 40
 	// tickInterval is the interval at which the connection sends an ACK containing the are sent.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
@@ -192,7 +195,12 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	conn.writeLock.Lock()
 	defer conn.writeLock.Unlock()
-
+	if time.Now().Sub(conn.recoveryQueue.LastClean()) > resendDelay {
+		// Datagrams we sent before have not been acknowledged for too long: We force these out again before
+		// sending the new one.
+		_ = conn.resend(conn.recoveryQueue.missing())
+		_ = conn.recoveryQueue.takeOut()
+	}
 	fragments := conn.split(b)
 	orderIndex := conn.sendOrderIndex
 	conn.sendOrderIndex++
@@ -486,6 +494,10 @@ func (conn *Conn) handlePacket(b []byte) error {
 		return conn.handleConnectedPong(buffer)
 	case idDisconnectNotification:
 		return conn.Close()
+	case 04:
+		// This packet doesn't matter to us: We just ignore it but do put it in a switch case so that it isn't
+		// forwarded like a normal packet.
+		return nil
 	default:
 		if err := buffer.UnreadByte(); err != nil {
 			return fmt.Errorf("error unreading custom packet ID: %v", err)
@@ -729,7 +741,12 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 	if err := nack.read(b); err != nil {
 		return fmt.Errorf("error reading NACK: %v", err)
 	}
-	for _, sequenceNumber := range nack.packets {
+	return conn.resend(nack.packets)
+}
+
+// resend resends all datagrams in the recovery queue with the sequence numbers passed.
+func (conn *Conn) resend(sequenceNumbers []uint24) error {
+	for _, sequenceNumber := range sequenceNumbers {
 		val, ok := conn.recoveryQueue.take(sequenceNumber)
 		if !ok {
 			return fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)

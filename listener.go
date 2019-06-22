@@ -121,7 +121,6 @@ func (listener *Listener) Close() error {
 	if err != nil {
 		return err
 	}
-	close(listener.incoming)
 	if err := listener.conn.Close(); err != nil {
 		return fmt.Errorf("error closing UDP listener: %v", err)
 	}
