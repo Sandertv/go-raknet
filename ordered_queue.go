@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const DelayRecordCount = 40
+
 // orderedQueue is a queue of byte slices that are taken out in an ordered way. No byte slice may be taken out
 // that has been inserted with an index if all indices below that aren't also taken out.
 // orderedQueue is not safe for concurrent use.
@@ -14,11 +16,14 @@ type orderedQueue struct {
 	lowestIndex  uint24
 	highestIndex uint24
 	lastClean    time.Time
+
+	ptr    int
+	delays []time.Duration
 }
 
 // newOrderedQueue returns a new initialised ordered queue.
 func newOrderedQueue() *orderedQueue {
-	return &orderedQueue{queue: make(map[uint24]interface{}), timestamps: make(map[uint24]time.Time)}
+	return &orderedQueue{queue: make(map[uint24]interface{}), timestamps: make(map[uint24]time.Time), delays: make([]time.Duration, DelayRecordCount)}
 }
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
@@ -41,8 +46,26 @@ func (queue *orderedQueue) put(index uint24, value interface{}) error {
 // is true.
 func (queue *orderedQueue) take(index uint24) (val interface{}, ok bool) {
 	val, ok = queue.queue[index]
-	delete(queue.queue, index)
-	delete(queue.timestamps, index)
+	if ok {
+		delete(queue.queue, index)
+		queue.delays[queue.ptr] = time.Now().Sub(queue.timestamps[index])
+		queue.ptr++
+		if queue.ptr == DelayRecordCount {
+			queue.ptr = 0
+		}
+		delete(queue.timestamps, index)
+	}
+	return
+}
+
+// takeWithoutDelayAdd has the same functionality as take, but does not update the time it took for the
+// datagram to arrive.
+func (queue *orderedQueue) takeWithoutDelayAdd(index uint24) (val interface{}, ok bool) {
+	val, ok = queue.queue[index]
+	if ok {
+		delete(queue.queue, index)
+		delete(queue.timestamps, index)
+	}
 	return
 }
 
@@ -89,4 +112,22 @@ func (queue *orderedQueue) Len() int {
 // the recovery queue. It panics if the sequence number doesn't exist.
 func (queue *orderedQueue) Timestamp(sequenceNumber uint24) time.Time {
 	return queue.timestamps[sequenceNumber]
+}
+
+// AvgDelay returns the average delay between the putting of the value into the ordered queue and the taking
+// out of it again. It is measured over the last DelayRecordCount values put in.
+func (queue *orderedQueue) AvgDelay() time.Duration {
+	var average, records time.Duration
+	for _, delay := range queue.delays {
+		if delay == 0 {
+			break
+		}
+		average += delay
+		records++
+	}
+	if records == 0 {
+		// No records yet, we go with a rather high delay.
+		return time.Second
+	}
+	return average / records
 }

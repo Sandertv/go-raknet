@@ -206,7 +206,7 @@ func (state *connState) openConnectionRequest() (e error) {
 		}
 	}()
 
-	b := make([]byte, 128)
+	b := make([]byte, 1492)
 	for {
 		// Start reading in a loop so that we can find open connection reply 2 packets.
 		n, err := state.conn.Read(b)
@@ -249,7 +249,7 @@ func (state *connState) discoverMTUSize() (e error) {
 		}
 	}()
 
-	b := make([]byte, 128)
+	b := make([]byte, 1492)
 	for {
 		// Start reading in a loop so that we can find open connection reply 1 packets.
 		n, err := state.conn.Read(b)
@@ -277,7 +277,7 @@ func (state *connState) discoverMTUSize() (e error) {
 			if err := binary.Read(buffer, binary.BigEndian, response); err != nil {
 				return fmt.Errorf("error reading incompatible protocol version: %v", err)
 			}
-			return fmt.Errorf("error discovering MTU size: mismatched protocol: client protocol = %v, server protocol = %v", state.protocol, response.ServerProtocol)
+			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", state.protocol, response.ServerProtocol)
 		}
 	}
 }

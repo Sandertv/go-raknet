@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -26,9 +27,6 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
-	// minResendDelay is the delay until which the connection will start resending packets that the other side
-	// has not yet sent an ACK for.
-	minResendDelay = time.Millisecond * 10
 	// tickInterval is the interval at which the connection sends an ACK containing the are sent.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
@@ -88,6 +86,11 @@ type Conn struct {
 	// latency is the last measured latency between both ends of the connection. Note that this latency is
 	// not the round-trip time, but half of that.
 	latency atomic.Value
+	// packetLossChance is a percentage from 0-1 that specifies the chance that a packet read or written may
+	// be lost.
+	packetLossChance atomic.Value
+	readRand         *rand.Rand
+	writeRand        *rand.Rand
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
@@ -141,8 +144,11 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		packetChan:        make(chan *bytes.Buffer),
 		writeBuffer:       bytes.NewBuffer(nil),
 		readPacket:        &packet{},
+		readRand:          rand.New(rand.NewSource(time.Now().Unix())),
+		writeRand:         rand.New(rand.NewSource(time.Now().Unix())),
 	}
 	c.latency.Store(10)
+	c.packetLossChance.Store(0.0)
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
 	go func() {
@@ -153,14 +159,9 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		for {
 			select {
 			case <-pingTicker.C:
-				// We send a connected ping every four seconds to calculate the latency and let the other side
-				// know we haven't timed out.
-				packet := &connectedPing{PingTimestamp: timestamp()}
-				b := bytes.NewBuffer([]byte{idConnectedPing})
-				_ = binary.Write(b, binary.BigEndian, packet)
-				if _, err := c.Write(b.Bytes()); err != nil {
-					return
-				}
+				// We send a connected ping to calculate the latency and let the other side know we haven't
+				// timed out.
+				c.Ping()
 			case t := <-ticker.C:
 				received := c.datagramsReceived.Load().([]uint24)
 				if len(received) > 0 {
@@ -178,6 +179,19 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 					// If the timeout was long enough, we close the conn.
 					_ = c.Close()
 				}
+				c.writeLock.Lock()
+				var resendSeqNums []uint24
+				// Allow the average delay with a deviation of 50%.
+				delay := c.recoveryQueue.AvgDelay() * 3
+				for seqNum := range c.recoveryQueue.queue {
+					// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
+					// NACK has been issued yet.
+					if time.Now().Sub(c.recoveryQueue.Timestamp(seqNum)) > delay {
+						resendSeqNums = append(resendSeqNums, seqNum)
+					}
+				}
+				_ = c.resend(resendSeqNums)
+				c.writeLock.Unlock()
 
 			case <-c.close:
 				// Put a new boolean in the close channel to make sure other receivers also get it.
@@ -196,17 +210,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	conn.writeLock.Lock()
 	defer conn.writeLock.Unlock()
-
-	// Datagrams we sent before have not been acknowledged for too long: We force these out again before
-	// sending the new one.
-	delay := conn.resendDelay()
-	var resendSeqNums []uint24
-	for seqNum := range conn.recoveryQueue.queue {
-		if time.Now().Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
-			resendSeqNums = append(resendSeqNums, seqNum)
-		}
-	}
-	_ = conn.resend(resendSeqNums)
 
 	fragments := conn.split(b)
 	orderIndex := conn.sendOrderIndex
@@ -254,8 +257,11 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error writing packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
-			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
+		v := conn.packetLossChance.Load().(float64)
+		if v == 0 || conn.writeRand.Float64() > v {
+			if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+				return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
+			}
 		}
 		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
 		conn.writeBuffer.Reset()
@@ -340,6 +346,26 @@ func (conn *Conn) Latency() int {
 	return conn.latency.Load().(int)
 }
 
+// Ping pings the connection, updating the latency of the Conn if successful.
+func (conn *Conn) Ping() {
+	packet := &connectedPing{PingTimestamp: timestamp()}
+	b := bytes.NewBuffer([]byte{idConnectedPing})
+	_ = binary.Write(b, binary.BigEndian, packet)
+	if _, err := conn.Write(b.Bytes()); err != nil {
+		return
+	}
+}
+
+// SimulatePacketLoss makes the connection simulate packet loss, with a loss chance passed. It will start
+// to discard packets randomly depending on the loss chance, both for sending and for receiving packets.
+// The function panics if a loss change is higher than 1 or lower than 0.
+func (conn *Conn) SimulatePacketLoss(lossChance float64) {
+	if lossChance > 1 || lossChance < 0 {
+		panic(fmt.Sprintf("packet loss must be between 0-1, but got %v", lossChance))
+	}
+	conn.packetLossChance.Store(lossChance)
+}
+
 // packetPool is a sync.Pool used to pool packets that encapsulate their content.
 var packetPool = sync.Pool{
 	New: func() interface{} {
@@ -391,6 +417,11 @@ func (conn *Conn) split(b []byte) [][]byte {
 // receive receives a packet from the connection, handling it as appropriate. If not successful, an error is
 // returned.
 func (conn *Conn) receive(b *bytes.Buffer) error {
+	v := conn.packetLossChance.Load().(float64)
+	if v != 0 && conn.readRand.Float64() < v {
+		// Random discard.
+		return nil
+	}
 	headerFlags, err := b.ReadByte()
 	if err != nil {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
@@ -754,7 +785,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 // resend resends all datagrams in the recovery queue with the sequence numbers passed.
 func (conn *Conn) resend(sequenceNumbers []uint24) error {
 	for _, sequenceNumber := range sequenceNumbers {
-		val, ok := conn.recoveryQueue.take(sequenceNumber)
+		val, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
 		if !ok {
 			return fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
 		}
@@ -764,30 +795,28 @@ func (conn *Conn) resend(sequenceNumbers []uint24) error {
 		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
 			return fmt.Errorf("error writing recovered datagram header: %v", err)
 		}
-		sequenceNumber := conn.sendSequenceNumber
+		newSeqNum := conn.sendSequenceNumber
 		conn.sendSequenceNumber++
-		if err := writeUint24(conn.writeBuffer, sequenceNumber); err != nil {
+		if err := writeUint24(conn.writeBuffer, newSeqNum); err != nil {
 			return fmt.Errorf("error writing recovered datagram sequence number: %v", err)
 		}
-
 		if err := packet.write(conn.writeBuffer); err != nil {
 			return fmt.Errorf("error writing recovered packet to buffer: %v", err)
 		}
+
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
-			return fmt.Errorf("error sending recovered packet to addr %v: %v", conn.addr, err)
+		v := conn.packetLossChance.Load().(float64)
+		if v == 0 || conn.writeRand.Float64() > v {
+			if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+				return fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
+			}
 		}
 		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
-		_ = conn.recoveryQueue.put(sequenceNumber, packet)
+		_ = conn.recoveryQueue.put(newSeqNum, packet)
 		conn.writeBuffer.Reset()
 	}
 	return nil
-}
-
-// resendDelay returns the delay that a packet is expected to have at most using the current latency.
-func (conn *Conn) resendDelay() time.Duration {
-	return minResendDelay + time.Duration(conn.Latency()*2)*time.Millisecond
 }
 
 // requestConnection requests the connection from the server, provided this connection operates as a client.
