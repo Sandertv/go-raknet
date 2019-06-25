@@ -181,7 +181,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 				}
 				c.writeLock.Lock()
 				var resendSeqNums []uint24
-				// Allow the average delay with a deviation of 50%.
+				// Allow the average delay with a deviation of 200%.
 				delay := c.recoveryQueue.AvgDelay() * 3
 				for seqNum := range c.recoveryQueue.queue {
 					// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
