@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -18,9 +19,15 @@ import (
 // TCPListener in the net package.
 // Listener implements the net.Listener interface.
 type Listener struct {
-	conn     net.PacketConn
-	settings []Setting
+	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
+	// simply discards the messages.
+	ErrorLog *log.Logger
+	// Protocol is the protocol of the RakNet listener. It will only accept clients that attempt to connect
+	// with this RakNet protocol version, and is one of the constants found in conn.go.
+	// Protocol is raknet.MinecraftProtocol by default.
+	Protocol byte
 
+	conn net.PacketConn
 	// incoming is a channel of incoming connections. Connections that end up in here will also end up in
 	// the connections map.
 	incoming chan *Conn
@@ -45,7 +52,9 @@ type Listener struct {
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
 // successful, an error is returned.
 // The address follows the same rules as those defined in the net.TCPListen() function.
-func Listen(address string, settings ...Setting) (*Listener, error) {
+// Specific features of the listener may be modified once it is returned, such as the used ErrorLog and/or the
+// accepted protocol.
+func Listen(address string) (*Listener, error) {
 	conn, err := net.ListenPacket("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error creating UDP listener: %v", err)
@@ -54,18 +63,14 @@ func Listen(address string, settings ...Setting) (*Listener, error) {
 	// Seed the global rand so we can get a random ID.
 	rand.Seed(time.Now().Unix())
 	listener := &Listener{
+		ErrorLog: log.New(os.Stderr, "", log.LstdFlags),
+		Protocol: MinecraftProtocol,
 		conn:     conn,
-		settings: settings,
 		incoming: make(chan *Conn, 128),
 		close:    make(chan bool, 1),
 		id:       rand.Int63(),
 		protocol: MinecraftProtocol,
 	}
-	settingMap := mapSettings(settings)
-	if v, ok := settingMap[version]; ok {
-		listener.protocol = v.(byte)
-	}
-
 	listener.pongData.Store([]byte{})
 	go listener.listen()
 	return listener, nil
@@ -155,7 +160,7 @@ func (listener *Listener) HijackPong(address string) error {
 		for {
 			select {
 			case <-ticker.C:
-				data, err := Ping(address, listener.settings...)
+				data, err := Dialer{Protocol: listener.Protocol}.Ping(address)
 				if err != nil {
 					// It's okay if these packets are lost sometimes. There's no need to log this.
 					continue
@@ -205,7 +210,7 @@ func (listener *Listener) listen() {
 		}
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
-			log.Printf("error reading from UDP connection (rakAddr = %v): %v", addr, err)
+			listener.ErrorLog.Printf("error reading from UDP connection (rakAddr = %v): %v", addr, err)
 			continue
 		}
 		buffer := b[:n]
@@ -213,7 +218,7 @@ func (listener *Listener) listen() {
 		// Technically we should not re-use the same byte slice after its ownership has been taken by the
 		// buffer, but we can do this anyway because we copy the data later.
 		if err := listener.handle(bytes.NewBuffer(buffer), addr); err != nil {
-			log.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
+			listener.ErrorLog.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
 		}
 	}
 }

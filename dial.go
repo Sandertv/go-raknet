@@ -7,17 +7,51 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"time"
 )
+
+// Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
+// or a hostname, combined with a port that is separated with ':'.
+// Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
+// connection will timeout and an error will be returned.
+// Dial fills out a Dialer struct with a default error logger and raknet.MinecraftProtocol as protocol.
+func Dial(address string) (*Conn, error) {
+	return Dialer{}.Dial(address)
+}
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
-func Ping(address string, settings ...Setting) (response []byte, err error) {
+// Ping fills out a Dialer struct with raknet.MinecraftProtocol as protocol.
+func Ping(address string) (response []byte, err error) {
+	return Dialer{}.Ping(address)
+}
+
+// Dialer allows dialing a RakNet connection with specific configuration, such as the protocol version of the
+// connection and the logger used.
+type Dialer struct {
+	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
+	// simply discards the messages.
+	ErrorLog *log.Logger
+	// Protocol is the protocol of the RakNet connection. Servers will only accept connections with the same
+	// protocol version as theirs, which is one of the constants found in conn.go.
+	// Protocol is raknet.MinecraftProtocol by default.
+	Protocol byte
+}
+
+// Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
+// slice containing the data is returned. If the ping failed, an error is returned describing the failure.
+// Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
+// is returned which implies a timeout occurred.
+func (dialer Dialer) Ping(address string) (response []byte, err error) {
 	conn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
+	}
+	if dialer.Protocol == 0 {
+		dialer.Protocol = MinecraftProtocol
 	}
 
 	buffer := bytes.NewBuffer(nil)
@@ -52,18 +86,11 @@ func Ping(address string, settings ...Setting) (response []byte, err error) {
 	} else if b != idUnconnectedPong {
 		return nil, fmt.Errorf("response pong did not have unconnected pong ID")
 	}
-
-	settingMap := mapSettings(settings)
-	protocol := MinecraftProtocol
-	if v, ok := settingMap[version]; ok {
-		protocol = v.(byte)
-	}
-
 	pong := &unconnectedPong{}
 	if err := binary.Read(buffer, binary.BigEndian, pong); err != nil {
 		return nil, fmt.Errorf("error decoding unconnected pong: %v", err)
 	}
-	if protocol == MinecraftProtocol {
+	if dialer.Protocol == MinecraftProtocol {
 		// Skip the length as we don't need it for reading.
 		_ = buffer.Next(2)
 	}
@@ -77,8 +104,8 @@ func Ping(address string, settings ...Setting) (response []byte, err error) {
 // or a hostname, combined with a port that is separated with ':'.
 // Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
 // connection will timeout and an error will be returned.
-// Optionally, a variadic amount of settings may be passed into Dial to specify additional behaviour.
-func Dial(address string, settings ...Setting) (*Conn, error) {
+// Dial will fill out any values left as their empty values with the default values of those fields.
+func (dialer Dialer) Dial(address string) (*Conn, error) {
 	udpConn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
@@ -91,18 +118,18 @@ func Dial(address string, settings ...Setting) (*Conn, error) {
 	rand.Seed(time.Now().Unix())
 	id := rand.Int63()
 
-	settingMap := mapSettings(settings)
-	protocol := MinecraftProtocol
-	if v, ok := settingMap[version]; ok {
-		protocol = v.(byte)
+	if dialer.ErrorLog == nil {
+		dialer.ErrorLog = log.New(os.Stderr, "", log.LstdFlags)
 	}
-
+	if dialer.Protocol == 0 {
+		dialer.Protocol = MinecraftProtocol
+	}
 	state := &connState{
 		conn:               udpConn,
 		remoteAddr:         udpConn.RemoteAddr(),
 		discoveringMTUSize: 1492,
 		id:                 id,
-		protocol:           protocol,
+		protocol:           dialer.Protocol,
 	}
 	if err := state.discoverMTUSize(); err != nil {
 		return nil, fmt.Errorf("error discovering MTU size: %v", err)
@@ -127,7 +154,7 @@ func Dial(address string, settings ...Setting) (*Conn, error) {
 		return nil, fmt.Errorf("error requesting connection: %v", err)
 	}
 
-	go clientListen(conn, udpConn)
+	go clientListen(conn, udpConn, dialer.ErrorLog)
 	select {
 	case <-conn.finishedSequence:
 		// Clear all read deadlines as we no longer need these.
@@ -153,7 +180,7 @@ func (conn *wrappedConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 
 // clientListen makes the RakNet connection passed listen as a client for packets received in the connection
 // passed.
-func clientListen(rakConn *Conn, conn net.Conn) {
+func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
 	b := make([]byte, 1492)
@@ -164,11 +191,11 @@ func clientListen(rakConn *Conn, conn net.Conn) {
 				// The connection was closed, so we can return from the function without logging the error.
 				return
 			}
-			log.Printf("client: error reading from Conn: %v", err)
+			errorLog.Printf("client: error reading from Conn: %v", err)
 			return
 		}
 		if err := rakConn.receive(bytes.NewBuffer(b[:n])); err != nil {
-			log.Printf("error handling packet: %v\n", err)
+			errorLog.Printf("error handling packet: %v\n", err)
 		}
 	}
 }
