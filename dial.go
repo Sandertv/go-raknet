@@ -224,10 +224,19 @@ type connState struct {
 func (state *connState) openConnectionRequest() (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
+	stop := make(chan bool, 1)
+	defer func() {
+		stop <- true
+	}()
 	go func() {
-		for range ticker.C {
-			if err := state.sendOpenConnectionRequest2(); err != nil {
-				e = err
+		for {
+			select {
+			case <-ticker.C:
+				if err := state.sendOpenConnectionRequest2(); err != nil {
+					e = err
+					return
+				}
+			case <-stop:
 				return
 			}
 		}
@@ -264,15 +273,24 @@ func (state *connState) openConnectionRequest() (e error) {
 func (state *connState) discoverMTUSize() (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
+	stop := make(chan bool, 1)
+	defer func() {
+		stop <- true
+	}()
 	go func() {
-		for range ticker.C {
-			if err := state.sendOpenConnectionRequest1(); err != nil {
-				e = err
+		for {
+			select {
+			case <-ticker.C:
+				if err := state.sendOpenConnectionRequest1(); err != nil {
+					e = err
+					return
+				}
+				// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
+				// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
+				state.discoveringMTUSize -= 40
+			case <-stop:
 				return
 			}
-			// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
-			// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
-			state.discoveringMTUSize -= 40
 		}
 	}()
 

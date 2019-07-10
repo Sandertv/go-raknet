@@ -140,7 +140,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		datagramRecvQueue: newOrderedQueue(),
 		packetQueue:       newOrderedQueue(),
 		recoveryQueue:     newOrderedQueue(),
-		close:             make(chan bool, 1),
+		close:             make(chan bool, 2),
 		packetChan:        make(chan *bytes.Buffer),
 		writeBuffer:       bytes.NewBuffer(nil),
 		readPacket:        &packet{},
@@ -163,6 +163,13 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 				// timed out.
 				c.Ping()
 			case t := <-ticker.C:
+				// We first check if the other end has actually timed out. If so, we close the conn, as it is
+				// likely the client was disconnected.
+				if t.Sub(c.lastPacketTime.Load().(time.Time)) > connTimeout {
+					// If the timeout was long enough, we close the conn.
+					_ = c.Close()
+					return
+				}
 				received := c.datagramsReceived.Load().([]uint24)
 				if len(received) > 0 {
 					// Write an ACK packet to the connection containing all datagram sequence numbers that we
@@ -171,13 +178,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 						return
 					}
 					c.datagramsReceived.Store(received[:0])
-				}
-
-				// After that, we check if the other end has actually timed out. If so, we close the conn, as
-				// it is likely the client was disconnected.
-				if t.Sub(c.lastPacketTime.Load().(time.Time)) > connTimeout {
-					// If the timeout was long enough, we close the conn.
-					_ = c.Close()
 				}
 				c.writeLock.Lock()
 				var resendSeqNums []uint24
