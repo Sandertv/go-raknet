@@ -542,7 +542,13 @@ func (conn *Conn) handlePacket(b []byte) error {
 		}
 		// Insert the packet contents the packet queue could release in the channel so that Conn.Read() can
 		// get a hold of them.
-		conn.packetChan <- buffer
+		select {
+		case conn.packetChan <- buffer:
+		case <-conn.close:
+			conn.close <- true
+			return nil
+		}
+
 	}
 	return nil
 }
