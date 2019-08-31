@@ -339,11 +339,11 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 
 // read reads an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) read(b *bytes.Buffer) error {
+	const maxAcknowledgementPackets = 512
 	var recordCount int16
 	if err := binary.Read(b, binary.BigEndian, &recordCount); err != nil {
 		return err
 	}
-	count := 0
 	for i := int16(0); i < recordCount; i++ {
 		recordType, err := b.ReadByte()
 		if err != nil {
@@ -361,7 +361,9 @@ func (ack *acknowledgement) read(b *bytes.Buffer) error {
 			}
 			for pack := start; pack <= end; pack++ {
 				ack.packets = append(ack.packets, pack)
-				count++
+				if len(ack.packets) > maxAcknowledgementPackets {
+					return fmt.Errorf("maximum amount of packets in acknowledgement exceeded")
+				}
 			}
 		case packetSingle:
 			packet, err := readUint24(b)
@@ -369,7 +371,9 @@ func (ack *acknowledgement) read(b *bytes.Buffer) error {
 				return err
 			}
 			ack.packets = append(ack.packets, packet)
-			count++
+			if len(ack.packets) > maxAcknowledgementPackets {
+				return fmt.Errorf("maximum amount of packets in acknowledgement exceeded")
+			}
 		}
 	}
 	return nil
