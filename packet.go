@@ -42,20 +42,10 @@ const (
 	// reliabilityReliableSequenced means that the packet sent could not arrive, but ensures that the packet
 	// will be in the right order and not be duplicated.
 	reliabilityReliableSequenced
-	// reliabilityUnreliableWithAck means that the packet sent could arrive out of order, be duplicated or
-	// just not arrive at all. The client will send an acknowledgement if it got the packet.
-	reliabilityUnreliableWithAck
-	// reliabilityReliableWithAck means that every packet sent arrives, arrives in the right order and is not
-	// duplicated. The client will send an acknowledgement if it got the packet.
-	reliabilityReliableWithAck
-	// reliabilityReliableOrderedWithAck means that the packet sent could not arrive, but ensures that the
-	// packet will be in the right order and not be duplicated. The client will send an acknowledgement if it
-	// got the packet.
-	reliabilityReliableOrderedWithAck
 
 	// splitFlag is set in the header if the packet was split. If so, the encapsulation contains additional
 	// data about the fragment.
-	splitFlag byte = 0x10
+	splitFlag = 0x10
 )
 
 type connectedPing struct {
@@ -203,9 +193,7 @@ func (packet *packet) reliable() bool {
 	switch packet.reliability {
 	case reliabilityReliable,
 		reliabilityReliableOrdered,
-		reliabilityReliableSequenced,
-		reliabilityReliableWithAck,
-		reliabilityReliableOrderedWithAck:
+		reliabilityReliableSequenced:
 		return true
 	}
 	return false
@@ -215,8 +203,7 @@ func (packet *packet) sequencedOrOrdered() bool {
 	switch packet.reliability {
 	case reliabilityUnreliableSequenced,
 		reliabilityReliableOrdered,
-		reliabilityReliableSequenced,
-		reliabilityReliableOrderedWithAck:
+		reliabilityReliableSequenced:
 		return true
 	}
 	return false
