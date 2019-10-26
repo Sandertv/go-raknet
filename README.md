@@ -1,7 +1,7 @@
 # go-raknet
 
-go-raknet is a library that implements a basic version of the RakNet protocol, which is used for games such as
-Minecraft (Bedrock Edition) and Terraria (Mobile Edition). It implements Unreliable, Reliable and 
+go-raknet is a library that implements a basic version of the RakNet protocol, which is used for
+Minecraft (Bedrock Edition). It implements Unreliable, Reliable and 
 ReliableOrdered packets and sends user packets as ReliableOrdered.
 
 go-raknet attempts to abstract away direct interaction with RakNet, and provides simple to use, idiomatic Go
