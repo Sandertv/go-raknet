@@ -27,7 +27,8 @@ const (
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
-	// tickInterval is the interval at which the connection sends an ACK containing the are sent.
+	// tickInterval is the interval at which the connection sends an ACK containing the packets which were
+	// received or a NACK for missing packets.
 	tickInterval = time.Second / 100
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = time.Second * 4
@@ -144,8 +145,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		packetChan:        make(chan *bytes.Buffer),
 		writeBuffer:       bytes.NewBuffer(nil),
 		readPacket:        &packet{},
-		readRand:          rand.New(rand.NewSource(time.Now().Unix())),
-		writeRand:         rand.New(rand.NewSource(time.Now().Unix())),
 	}
 	c.latency.Store(10)
 	c.packetLossChance.Store(0.0)
@@ -364,6 +363,8 @@ func (conn *Conn) SimulatePacketLoss(lossChance float64) {
 		panic(fmt.Sprintf("packet loss must be between 0-1, but got %v", lossChance))
 	}
 	conn.packetLossChance.Store(lossChance)
+	conn.readRand = rand.New(rand.NewSource(time.Now().Unix()))
+	conn.writeRand = rand.New(rand.NewSource(time.Now().Unix()))
 }
 
 // packetPool is a sync.Pool used to pool packets that encapsulate their content.

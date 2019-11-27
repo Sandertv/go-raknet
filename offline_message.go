@@ -3,6 +3,7 @@ package raknet
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 )
 
 const (
@@ -162,8 +163,14 @@ func unmarshalAddr(buffer *bytes.Buffer) (*rakAddr, error) {
 	var addrBytes []byte
 	if ver == 4 {
 		addrBytes = buffer.Next(ipv4AddrSize)
+		if len(addrBytes) != ipv4AddrSize {
+			return nil, fmt.Errorf("not enough bytes for ipv4 address")
+		}
 	} else {
 		addrBytes = buffer.Next(ipv6AddrSize)
+		if len(addrBytes) != ipv6AddrSize {
+			return nil, fmt.Errorf("not enough bytes for ipv6 address")
+		}
 	}
 	if err := addr.UnmarshalBinary(addrBytes); err != nil {
 		return nil, err
