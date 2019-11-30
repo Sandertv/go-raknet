@@ -73,8 +73,10 @@ func (dialer Dialer) Ping(address string) (response []byte, err error) {
 	data := make([]byte, 1492)
 	// Set a read deadline so that we get a timeout if the server doesn't respond to us.
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second * 5))
-	if _, err := conn.Read(data); err != nil {
+	if n, err := conn.Read(data); err != nil {
 		return nil, fmt.Errorf("timeout reading the response: %v", err)
+	} else {
+		data = data[:n]
 	}
 
 	// Decode the header byte and make sure it's actually correct.
