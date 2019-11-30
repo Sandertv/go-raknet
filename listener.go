@@ -336,7 +336,7 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 	b.Reset()
 
 	pongData := listener.pongData.Load().([]byte)
-	response := &unconnectedPong{Magic: magic, ServerGUID: listener.id, SendTimestamp: timestamp()}
+	response := &unconnectedPong{Magic: magic, ServerGUID: listener.id, SendTimestamp: packet.SendTimestamp}
 	if err := b.WriteByte(idUnconnectedPong); err != nil {
 		return fmt.Errorf("error writing unconnected pong ID: %v", err)
 	}
@@ -359,5 +359,5 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 
 // timestamp returns a timestamp in milliseconds.
 func timestamp() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
+	return time.Now().UnixNano() / int64(time.Second)
 }
