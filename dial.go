@@ -143,10 +143,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), state.mtuSize, id)
 	go func() {
 		// Wait for the connection to be closed...
-		<-conn.close
-		// Insert the boolean back into the channel so that other readers of the channel can also find out
-		// it was closed.
-		conn.close <- true
+		<-conn.closeCtx.Done()
 		if err := conn.conn.Close(); err != nil {
 			// Should not happen.
 			panic(err)
@@ -158,7 +155,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 
 	go clientListen(conn, udpConn, dialer.ErrorLog)
 	select {
-	case <-conn.finishedSequence:
+	case <-conn.completingSequence.Done():
 		// Clear all read deadlines as we no longer need these.
 		_ = udpConn.SetReadDeadline(time.Time{})
 		_ = conn.SetReadDeadline(time.Time{})

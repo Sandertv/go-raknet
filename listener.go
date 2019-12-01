@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -35,7 +36,8 @@ type Listener struct {
 	// connections is a map of currently active connections, indexed by their address.
 	connections sync.Map
 
-	close chan bool
+	closeCtx context.Context
+	close    context.CancelFunc
 
 	// id is a random server ID generated upon starting listening. It is used several times throughout the
 	// connection sequence of RakNet.
@@ -62,17 +64,21 @@ func Listen(address string) (*Listener, error) {
 
 	// Seed the global rand so we can get a random ID.
 	rand.Seed(time.Now().Unix())
+	ctx, cancel := context.WithCancel(context.Background())
+
 	listener := &Listener{
 		ErrorLog: log.New(os.Stderr, "", log.LstdFlags),
 		Protocol: MinecraftProtocol,
 		conn:     conn,
 		incoming: make(chan *Conn, 128),
-		close:    make(chan bool, 1),
+		closeCtx: ctx,
+		close:    cancel,
 		id:       rand.Int63(),
 		protocol: MinecraftProtocol,
 	}
 	listener.pongData.Store([]byte{})
 	go listener.listen()
+
 	return listener, nil
 }
 
@@ -86,17 +92,18 @@ accept:
 		return nil, fmt.Errorf("error accepting connection: listener closed")
 	}
 	select {
-	case <-conn.finishedSequence:
+	case <-listener.closeCtx.Done():
+		return nil, fmt.Errorf("error accepting connection: listener closed")
+	case <-conn.completingSequence.Done():
 		go func() {
-			<-conn.close
+			<-conn.closeCtx.Done()
 			// Insert the boolean back in the channel so that other readers of the channel also receive
 			// the signal.
-			conn.close <- true
 			listener.connections.Delete(conn.addr.String())
 		}()
 		return conn, nil
 	case <-time.After(time.Second * 10):
-		// It took too long to complete this connection. We close it and go back to accepting.
+		// It took too long to complete this connection. We closeCtx it and go back to accepting.
 		_ = conn.Close()
 		goto accept
 	}
@@ -110,11 +117,8 @@ func (listener *Listener) Addr() net.Addr {
 // Close closes the listener so that it may be cleaned up. It makes sure the goroutine handling incoming
 // packets is able to be freed.
 func (listener *Listener) Close() error {
-	if len(listener.close) != 0 {
-		// The listener was already closed, no need to do it again.
-		return nil
-	}
-	listener.close <- true
+	listener.close()
+
 	var err error
 	listener.connections.Range(func(key, value interface{}) bool {
 		conn := value.(*Conn)
@@ -148,8 +152,6 @@ func (listener *Listener) PongData(data []byte) {
 // If the address passed could not be resolved, an error is returned.
 // Calling HijackPong means that any current and future pong data set using listener.PongData is overwritten
 // each update.
-// A list of settings may be passed in to specify additional settings such as the protocol version for the
-// ping/pong.
 func (listener *Listener) HijackPong(address string) error {
 	if _, err := net.ResolveUDPAddr("udp", address); err != nil {
 		return fmt.Errorf("error resolving UDP address: %v", err)
@@ -181,10 +183,7 @@ func (listener *Listener) HijackPong(address string) error {
 				} else {
 					listener.PongData(data)
 				}
-			case <-listener.close:
-				// Add another value to the channel so that other listeners can listen for the closing of the
-				// listener too.
-				listener.close <- true
+			case <-listener.closeCtx.Done():
 				return
 			}
 		}
@@ -198,20 +197,16 @@ func (listener *Listener) ID() int64 {
 	return listener.id
 }
 
-// listen continuously reads from the listener's UDP connection, until close has a value in it.
+// listen continuously reads from the listener's UDP connection, until closeCtx has a value in it.
 func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
 	b := make([]byte, 1500)
 	for {
-		if len(listener.close) == 1 {
-			// Stop the function so that any goroutine that is running it is able to be cleaned up.
-			return
-		}
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
-			listener.ErrorLog.Printf("error reading from UDP connection (rakAddr = %v): %v", addr, err)
-			continue
+			close(listener.incoming)
+			return
 		}
 		buffer := b[:n]
 
@@ -281,6 +276,7 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 
 	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID)
 	listener.connections.Store(addr.String(), conn)
+
 	// Add the connection to the incoming channel so that a caller of Accept() can receive it.
 	listener.incoming <- conn
 

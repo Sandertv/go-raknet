@@ -129,7 +129,7 @@ func (reply *openConnectionReply2) MarshalBinary() (b []byte, err error) {
 	return buffer.Bytes(), nil
 }
 
-// UnmarshalBinary converts an open connection reply 2 to its binary representation.
+// UnmarshalBinary decode a serialised open connection reply 2 into a struct.
 func (reply *openConnectionReply2) UnmarshalBinary(b []byte) error {
 	buffer := bytes.NewBuffer(b)
 	// Skip the magic sequence.

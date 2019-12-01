@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -74,9 +75,9 @@ type Conn struct {
 	sendMessageIndex   uint24
 	sendSplitID        uint32
 
-	// finishedSequence is a channel that has a value submitted to it once the connection has finished the
-	// RakNet connection sequence.
-	finishedSequence chan bool
+	// completingSequence is a Context which is completed once the RakNet connection sequence is completed.
+	completingSequence context.Context
+	finishSequence     context.CancelFunc
 
 	// id is the random client GUID of the client. It is different each time a client connects to to a server.
 	id int64
@@ -118,8 +119,8 @@ type Conn struct {
 	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
 	recoveryQueue *orderedQueue
 
-	// close gets sent values when the connection is closed.
-	close chan bool
+	closeCtx context.Context
+	close    context.CancelFunc
 
 	// readDeadline is a channel that receives a time.Time after a specific time. It is used to listen for
 	// timeouts in Read after calling SetReadDeadline.
@@ -131,20 +132,24 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 	if mtuSize < 500 {
 		mtuSize = 500
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())
 	c := &Conn{
-		addr:              addr,
-		conn:              conn,
-		mtuSize:           mtuSize,
-		id:                id,
-		finishedSequence:  make(chan bool),
-		splits:            make(map[uint16][][]byte),
-		datagramRecvQueue: newOrderedQueue(),
-		packetQueue:       newOrderedQueue(),
-		recoveryQueue:     newOrderedQueue(),
-		close:             make(chan bool, 2),
-		packetChan:        make(chan *bytes.Buffer),
-		writeBuffer:       bytes.NewBuffer(nil),
-		readPacket:        &packet{},
+		addr:               addr,
+		conn:               conn,
+		mtuSize:            mtuSize,
+		id:                 id,
+		completingSequence: sequenceCtx,
+		finishSequence:     sequenceComplete,
+		splits:             make(map[uint16][][]byte),
+		datagramRecvQueue:  newOrderedQueue(),
+		packetQueue:        newOrderedQueue(),
+		recoveryQueue:      newOrderedQueue(),
+		close:              cancel,
+		closeCtx:           ctx,
+		packetChan:         make(chan *bytes.Buffer),
+		writeBuffer:        bytes.NewBuffer(nil),
+		readPacket:         &packet{},
 	}
 	c.latency.Store(10)
 	c.packetLossChance.Store(0.0)
@@ -162,10 +167,10 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 				// timed out.
 				c.Ping()
 			case t := <-ticker.C:
-				// We first check if the other end has actually timed out. If so, we close the conn, as it is
+				// We first check if the other end has actually timed out. If so, we closeCtx the conn, as it is
 				// likely the client was disconnected.
 				if t.Sub(c.lastPacketTime.Load().(time.Time)) > connTimeout {
-					// If the timeout was long enough, we close the conn.
+					// If the timeout was long enough, we closeCtx the conn.
 					_ = c.Close()
 					return
 				}
@@ -192,9 +197,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 				_ = c.resend(resendSeqNums)
 				c.writeLock.Unlock()
 
-			case <-c.close:
-				// Put a new boolean in the close channel to make sure other receivers also get it.
-				c.close <- true
+			case <-c.closeCtx.Done():
 				return
 			}
 		}
@@ -283,8 +286,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 			err = fmt.Errorf("raknet.Conn read: read raknet: A message sent on a RakNet socket was larger than the buffer used to receive the message into")
 		}
 		return copy(b, packet.Bytes()), err
-	case <-conn.close:
-		conn.close <- true
+	case <-conn.closeCtx.Done():
 		return 0, errors.New(errConnectionClosed)
 	case <-conn.readDeadline:
 		return 0, errors.New(errReadTimeout)
@@ -293,11 +295,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
 func (conn *Conn) Close() error {
-	if len(conn.close) != 0 {
-		// The connection was already closed, don't do anything.
-		return nil
-	}
-	conn.close <- true
+	conn.close()
 	return nil
 }
 
@@ -526,7 +524,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 	case idConnectionRequestAccepted:
 		return conn.handleConnectionRequestAccepted(buffer)
 	case idNewIncomingConnection:
-		conn.finishedSequence <- true
+		conn.finishSequence()
 	case idConnectedPing:
 		return conn.handleConnectedPing(buffer)
 	case idConnectedPong:
@@ -545,8 +543,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 		// get a hold of them.
 		select {
 		case conn.packetChan <- buffer:
-		case <-conn.close:
-			conn.close <- true
+		case <-conn.closeCtx.Done():
 			return nil
 		}
 
@@ -677,7 +674,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 		return fmt.Errorf("error sending new incoming connection: %v", err)
 	}
 
-	conn.finishedSequence <- true
+	conn.finishSequence()
 	return nil
 }
 
