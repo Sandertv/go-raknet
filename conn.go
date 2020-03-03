@@ -787,11 +787,14 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 }
 
 // resend resends all datagrams in the recovery queue with the sequence numbers passed.
-func (conn *Conn) resend(sequenceNumbers []uint24) error {
+func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
 		val, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
 		if !ok {
-			return fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
+			// We could not resend this datagram. Maybe it was already resent before at the request of the
+			// client. We set the error and continue.
+			err = fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
+			continue
 		}
 		packet := val.(*packet)
 
