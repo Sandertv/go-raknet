@@ -326,7 +326,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 
 // read reads an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) read(b *bytes.Buffer) error {
-	const maxAcknowledgementPackets = 512
+	const maxAcknowledgementPackets = 4096
 	var recordCount int16
 	if err := binary.Read(b, binary.BigEndian, &recordCount); err != nil {
 		return err
