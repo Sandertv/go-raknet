@@ -16,16 +16,7 @@ const (
 	bitFlagNACK = 0x20
 )
 
-const (
-	idConnectedPing = 0x00
-	idConnectedPong = 0x03
-
-	idConnectionRequest         = 0x09
-	idConnectionRequestAccepted = 0x10
-	idNewIncomingConnection     = 0x13
-	idDisconnectNotification    = 0x15
-)
-
+//noinspection GoUnusedConst
 const (
 	// reliabilityUnreliable means that the packet sent could arrive out of order, be duplicated, or just not
 	// arrive at all. It is usually used for high frequency packets of which the order does not matter.
@@ -48,30 +39,7 @@ const (
 	splitFlag = 0x10
 )
 
-type connectedPing struct {
-	PingTimestamp int64
-}
-
-type connectedPong struct {
-	PingTimestamp int64
-	PongTimestamp int64
-}
-
-type connectionRequest struct {
-	ClientGUID       int64
-	RequestTimestamp int64
-	Secure           bool
-}
-
-type connectionRequestAccepted struct {
-	// ClientAddress
-	RequestTimestamp  int64
-	AcceptedTimestamp int64
-	// 20 system addresses
-}
-
-type newIncomingConnection connectionRequestAccepted
-
+// packet is an encapsulation around every packet sent after the connection is established. It is
 type packet struct {
 	reliability byte
 
@@ -86,6 +54,7 @@ type packet struct {
 	splitID    uint16
 }
 
+// write writes the packet and its content to the buffer passed.
 func (packet *packet) write(b *bytes.Buffer) error {
 	header := packet.reliability << 5
 	if packet.split {
@@ -131,6 +100,7 @@ func (packet *packet) write(b *bytes.Buffer) error {
 	return nil
 }
 
+// read reads a packet and its content from the buffer passed.
 func (packet *packet) read(b *bytes.Buffer) error {
 	header, err := b.ReadByte()
 	if err != nil {

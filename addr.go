@@ -7,11 +7,6 @@ import (
 	"net"
 )
 
-const (
-	ipv4AddrSize = 1 + 4 + 2
-	ipv6AddrSize = 1 + 2 + 2 + 4 + 16 + 4
-)
-
 // rakAddr is a wrapper around a net.UDPAddr that provides Marshal- and UnmarshalBinary methods for RakNet
 // specific address writing.
 type rakAddr net.UDPAddr
@@ -22,6 +17,7 @@ func (addr *rakAddr) UnmarshalBinary(b []byte) error {
 	if addr == nil {
 		// No address was set. We create an empty address in which we will decode the values we find.
 		v := rakAddr(net.UDPAddr{})
+		//noinspection GoAssignmentToReceiver
 		addr = &v
 	}
 	ver, err := buffer.ReadByte()
@@ -76,6 +72,7 @@ func (addr *rakAddr) MarshalBinary() (b []byte, err error) {
 		v := rakAddr(net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0})
 		// This may look weird, but this is intended. We don't need this to be set for the caller, only for
 		// the rest of this function's scope.
+		//noinspection GoAssignmentToReceiver
 		addr = &v
 	}
 	var ver byte = 6

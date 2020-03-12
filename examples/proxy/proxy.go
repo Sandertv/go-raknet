@@ -15,6 +15,7 @@ func main() {
 	}
 	// We hijack the pong of a Minecraft server, so our proxy will continuously send the pong data of the
 	// server.
+	//noinspection SpellCheckingInspection
 	if err := listener.HijackPong("mco.mineplex.com:19132"); err != nil {
 		panic(err)
 	}
@@ -25,6 +26,7 @@ func main() {
 			panic(err)
 		}
 		// We spin up a new connection with the server each time a client connects to the proxy.
+		//noinspection SpellCheckingInspection
 		server, err := raknet.Dial("mco.mineplex.com:19132")
 		if err != nil {
 			panic(err)

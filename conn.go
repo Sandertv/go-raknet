@@ -3,9 +3,9 @@ package raknet
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/sandertv/go-raknet/internal/message"
 	"math/rand"
 	"net"
 	"strings"
@@ -15,12 +15,8 @@ import (
 )
 
 const (
-	// MinecraftProtocol is the current default Minecraft RakNet protocol version. This is Minecraft specific.
-	// For the default RakNet, use OfficialProtocol.
-	// MinecraftProtocol is the default in go-raknet.
-	MinecraftProtocol byte = 9
-	// OfficialProtocol is the protocol version of the official open source RakNet library.
-	OfficialProtocol byte = 6
+	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
+	currentProtocol byte = 9
 
 	// connTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
 	// duration.
@@ -51,6 +47,7 @@ func ErrConnectionClosed(err error) bool {
 }
 
 // ErrReadTimeout checks if the error passed was an error caused by a timeout set when reading from the Conn.
+//noinspection GoUnusedExportedFunction
 func ErrReadTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -155,55 +152,63 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 	c.packetLossChance.Store(0.0)
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
-	go func() {
-		ticker := time.NewTicker(tickInterval)
-		pingTicker := time.NewTicker(pingInterval)
-		defer ticker.Stop()
-		defer pingTicker.Stop()
-		for {
-			select {
-			case <-pingTicker.C:
-				// We send a connected ping to calculate the latency and let the other side know we haven't
-				// timed out.
-				c.Ping()
-			case t := <-ticker.C:
-				// We first check if the other end has actually timed out. If so, we closeCtx the conn, as it is
-				// likely the client was disconnected.
-				if t.Sub(c.lastPacketTime.Load().(time.Time)) > connTimeout {
-					// If the timeout was long enough, we closeCtx the conn.
-					_ = c.Close()
-					return
-				}
-				received := c.datagramsReceived.Load().([]uint24)
-				if len(received) > 0 {
-					// Write an ACK packet to the connection containing all datagram sequence numbers that we
-					// received since the last tick.
-					if err := c.sendACK(received...); err != nil {
-						return
-					}
-					c.datagramsReceived.Store(received[:0])
-				}
-				c.writeLock.Lock()
-				var resendSeqNums []uint24
-				// Allow the average delay with a deviation of 200%.
-				delay := c.recoveryQueue.AvgDelay() * 3
-				for seqNum := range c.recoveryQueue.queue {
-					// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
-					// NACK has been issued yet.
-					if time.Now().Sub(c.recoveryQueue.Timestamp(seqNum)) > delay {
-						resendSeqNums = append(resendSeqNums, seqNum)
-					}
-				}
-				_ = c.resend(resendSeqNums)
-				c.writeLock.Unlock()
-
-			case <-c.closeCtx.Done():
-				return
-			}
-		}
-	}()
+	go c.startTicking()
 
 	return c
+}
+
+// startTicking makes the connection start ticking, sending ACKs and pings to the other end where necessary
+// and checking if the connection should be timed out.
+func (conn *Conn) startTicking() {
+	ticker, pingTicker := time.NewTicker(tickInterval), time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	defer pingTicker.Stop()
+	for {
+		select {
+		case <-pingTicker.C:
+			// We send a connected ping to calculate the latency and let the other side know we haven't
+			// timed out.
+			conn.sendPing()
+		case t := <-ticker.C:
+			// We first check if the other end has actually timed out. If so, we close the conn, as it is
+			// likely the client was disconnected.
+			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > connTimeout {
+				// If the timeout was long enough, we close the connection.
+				_ = conn.Close()
+				return
+			}
+			conn.checkResend()
+		case <-conn.closeCtx.Done():
+			return
+		}
+	}
+}
+
+// checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
+// received and sends any packets that have been pending for too long.
+func (conn *Conn) checkResend() {
+	received := conn.datagramsReceived.Load().([]uint24)
+	if len(received) > 0 {
+		// Write an ACK packet to the connection containing all datagram sequence numbers that we
+		// received since the last tick.
+		if err := conn.sendACK(received...); err != nil {
+			return
+		}
+		conn.datagramsReceived.Store(received[:0])
+	}
+	conn.writeLock.Lock()
+	var resendSeqNums []uint24
+	// Allow the average delay with a deviation of 200%.
+	delay := conn.recoveryQueue.AvgDelay() * 3
+	for seqNum := range conn.recoveryQueue.queue {
+		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
+		// NACK has been issued yet.
+		if time.Now().Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
+			resendSeqNums = append(resendSeqNums, seqNum)
+		}
+	}
+	_ = conn.resend(resendSeqNums)
+	conn.writeLock.Unlock()
 }
 
 // Write writes a buffer b over the RakNet connection. The amount of bytes written n is always equal to the
@@ -326,7 +331,7 @@ func (conn *Conn) SetReadDeadline(t time.Time) error {
 }
 
 // SetWriteDeadline has no behaviour. It is merely there to satisfy the net.Conn interface.
-func (conn *Conn) SetWriteDeadline(t time.Time) error {
+func (conn *Conn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
@@ -343,14 +348,11 @@ func (conn *Conn) Latency() int {
 	return conn.latency.Load().(int)
 }
 
-// Ping pings the connection, updating the latency of the Conn if successful.
-func (conn *Conn) Ping() {
-	packet := &connectedPing{PingTimestamp: timestamp()}
-	b := bytes.NewBuffer([]byte{idConnectedPing})
-	_ = binary.Write(b, binary.BigEndian, packet)
-	if _, err := conn.Write(b.Bytes()); err != nil {
-		return
-	}
+// sendPing pings the connection, updating the latency of the Conn if successful.
+func (conn *Conn) sendPing() {
+	b := bytes.NewBuffer(nil)
+	(&message.ConnectedPing{ClientTimestamp: timestamp()}).Write(b)
+	_, _ = conn.Write(b.Bytes())
 }
 
 // SimulatePacketLoss makes the connection simulate packet loss, with a loss chance passed. It will start
@@ -510,7 +512,7 @@ func (conn *Conn) receivePacket(packet *packet) error {
 // packet was not handled by RakNet, it is sent to the packet channel.
 func (conn *Conn) handlePacket(b []byte) error {
 	buffer := bytes.NewBuffer(b)
-	header, err := buffer.ReadByte()
+	id, err := buffer.ReadByte()
 	if err != nil {
 		return fmt.Errorf("error reading packet ID: %v", err)
 	}
@@ -518,18 +520,18 @@ func (conn *Conn) handlePacket(b []byte) error {
 	// Update the last time we received a packet so that the connection doesn't time out.
 	conn.lastPacketTime.Store(time.Now())
 
-	switch header {
-	case idConnectionRequest:
+	switch id {
+	case message.IDConnectionRequest:
 		return conn.handleConnectionRequest(buffer)
-	case idConnectionRequestAccepted:
+	case message.IDConnectionRequestAccepted:
 		return conn.handleConnectionRequestAccepted(buffer)
-	case idNewIncomingConnection:
+	case message.IDNewIncomingConnection:
 		conn.finishSequence()
-	case idConnectedPing:
+	case message.IDConnectedPing:
 		return conn.handleConnectedPing(buffer)
-	case idConnectedPong:
+	case message.IDConnectedPong:
 		return conn.handleConnectedPong(buffer)
-	case idDisconnectNotification:
+	case message.IDDisconnectNotification:
 		return conn.Close()
 	case 04:
 		// This packet doesn't matter to us: We just ignore it but do put it in a switch case so that it isn't
@@ -554,41 +556,33 @@ func (conn *Conn) handlePacket(b []byte) error {
 // handleConnectedPing handles a connected ping packet inside of buffer b. An error is returned if the packet
 // was invalid.
 func (conn *Conn) handleConnectedPing(b *bytes.Buffer) error {
-	packet := &connectedPing{}
-	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+	packet := &message.ConnectedPing{}
+	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading connected ping: %v", err)
 	}
 	b.Reset()
 
 	// Respond with a connected pong that has the ping timestamp found in the connected ping, and our own
 	// timestamp for the pong timestamp.
-	response := &connectedPong{PingTimestamp: packet.PingTimestamp, PongTimestamp: timestamp()}
-	if err := b.WriteByte(idConnectedPong); err != nil {
-		return fmt.Errorf("error writing connected pong ID: %v", err)
-	}
-	if err := binary.Write(b, binary.BigEndian, response); err != nil {
-		return fmt.Errorf("error writing connected pong: %v", err)
-	}
-	if _, err := conn.Write(b.Bytes()); err != nil {
-		return fmt.Errorf("error sending connected pong: %v", err)
-	}
-	return nil
+	(&message.ConnectedPong{ClientTimestamp: packet.ClientTimestamp, ServerTimestamp: timestamp()}).Write(b)
+	_, err := conn.Write(b.Bytes())
+	return err
 }
 
 // handleConnectedPong handles a connected pong packet inside of buffer b. An error is returned if the packet
 // was invalid.
 func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
-	packet := &connectedPong{}
-	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+	packet := &message.ConnectedPong{}
+	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading connected pong: %v", err)
 	}
 	now := timestamp()
-	if packet.PingTimestamp > now {
+	if packet.ClientTimestamp > now {
 		return fmt.Errorf("error measuring latency: ping timestamp is in the future")
 	}
 	// We measure the latency for a single packet from one end to another, not the round-trip time, so we
 	// divide the total time by 2.
-	conn.latency.Store(int(now-packet.PingTimestamp) / 2)
+	conn.latency.Store(int(now-packet.ClientTimestamp) / 2)
 
 	return nil
 }
@@ -596,86 +590,30 @@ func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
 // handleConnectionRequest handles a connection request packet inside of buffer b. An error is returned if the
 // packet was invalid.
 func (conn *Conn) handleConnectionRequest(b *bytes.Buffer) error {
-	packet := &connectionRequest{}
-	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+	packet := &message.ConnectionRequest{}
+	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading connection request: %v", err)
 	}
 	b.Reset()
-
-	if err := b.WriteByte(idConnectionRequestAccepted); err != nil {
-		return fmt.Errorf("error writing connection request accepted ID: %v", err)
-	}
-	addr := rakAddr(*conn.addr.(*net.UDPAddr))
-	data, err := (&addr).MarshalBinary()
-	if err != nil {
-		return fmt.Errorf("error encoding connection request accepted client address: %v", err)
-	}
-	if _, err := b.Write(data); err != nil {
-		return fmt.Errorf("error writing connection request accepted client address: %v", err)
-	}
-	_ = binary.Write(b, binary.BigEndian, int16(0))
-	for i := 0; i < 20; i++ {
-		// The middle of the connection request accepted packet has 20 system addresses. We write these
-		// separately.
-		var addr *rakAddr
-		encodedAddr, err := addr.MarshalBinary()
-		if err != nil {
-			return fmt.Errorf("error encoding connection request accepted system address: %v", err)
-		}
-		if _, err := b.Write(encodedAddr); err != nil {
-			return fmt.Errorf("error writing connection request accepted system address: %v", err)
-		}
-	}
-	response := &connectionRequestAccepted{RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: timestamp()}
-	if err := binary.Write(b, binary.BigEndian, response); err != nil {
-		return fmt.Errorf("error writing connection request accepted: %v", err)
-	}
-	if _, err := conn.Write(b.Bytes()); err != nil {
-		return fmt.Errorf("error sending connection request accepted: %v", err)
-	}
-
-	return nil
+	(&message.ConnectionRequestAccepted{ClientAddress: *conn.addr.(*net.UDPAddr), RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: timestamp()}).Write(b)
+	_, err := conn.Write(b.Bytes())
+	return err
 }
 
 // handleConnectionRequestAccepted handles a serialised connection request accepted packet in b, and returns
 // an error if not successful.
 func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
+	packet := &message.ConnectionRequestAccepted{}
+	if err := packet.Read(b); err != nil {
+		return fmt.Errorf("error reading connection request accepted: %v", err)
+	}
 	b.Reset()
 
-	if err := b.WriteByte(idNewIncomingConnection); err != nil {
-		return fmt.Errorf("error writing new incoming connection ID: %v", err)
-	}
-	addr := rakAddr(*conn.addr.(*net.UDPAddr))
-	data, err := (&addr).MarshalBinary()
-	if err != nil {
-		return fmt.Errorf("error encoding new incoming ocnnection server address: %v", err)
-	}
-	if _, err := b.Write(data); err != nil {
-		return fmt.Errorf("error writing new incoming connection server address: %v", err)
-	}
-	for i := 0; i < 20; i++ {
-		// The middle of the connection request accepted packet has 20 system addresses. We write these
-		// separately.
-		var addr *rakAddr
-		encodedAddr, err := addr.MarshalBinary()
-		if err != nil {
-			return fmt.Errorf("error encoding new incoming connection system address: %v", err)
-		}
-		if _, err := b.Write(encodedAddr); err != nil {
-			return fmt.Errorf("error writing new incoming connection system address: %v", err)
-		}
-	}
-	// We fill out nonsense timestamps as RakNet doesn't REALLY care about these.
-	response := &newIncomingConnection{RequestTimestamp: timestamp(), AcceptedTimestamp: timestamp()}
-	if err := binary.Write(b, binary.BigEndian, response); err != nil {
-		return fmt.Errorf("error writing new incoming connection: %v", err)
-	}
-	if _, err := conn.Write(b.Bytes()); err != nil {
-		return fmt.Errorf("error sending new incoming connection: %v", err)
-	}
+	(&message.NewIncomingConnection{ServerAddress: *conn.addr.(*net.UDPAddr), RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: packet.AcceptedTimestamp, SystemAddresses: packet.SystemAddresses}).Write(b)
+	_, err := conn.Write(b.Bytes())
 
 	conn.finishSequence()
-	return nil
+	return err
 }
 
 // handleSplitPacket handles a passed split packet. If it is the last split packet of its sequence, it will
@@ -786,7 +724,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 	return conn.resend(nack.packets)
 }
 
-// resend resends all datagrams in the recovery queue with the sequence numbers passed.
+// resend sends all datagrams currently in the recovery queue with the sequence numbers passed.
 func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
 		val, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
@@ -829,13 +767,8 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 // requestConnection requests the connection from the server, provided this connection operates as a client.
 // An error occurs if the request was not successful.
 func (conn *Conn) requestConnection() error {
-	b := bytes.NewBuffer([]byte{idConnectionRequest})
-	packet := &connectionRequest{ClientGUID: conn.id, RequestTimestamp: timestamp()}
-	if err := binary.Write(b, binary.BigEndian, packet); err != nil {
-		return fmt.Errorf("error writing connection request: %v", err)
-	}
-	if _, err := conn.Write(b.Bytes()); err != nil {
-		return fmt.Errorf("error sending connection request: %v", err)
-	}
-	return nil
+	b := bytes.NewBuffer(nil)
+	(&message.ConnectionRequest{ClientGUID: conn.id, RequestTimestamp: timestamp()}).Write(b)
+	_, err := conn.Write(b.Bytes())
+	return err
 }

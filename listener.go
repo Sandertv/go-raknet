@@ -3,8 +3,8 @@ package raknet
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
+	"github.com/sandertv/go-raknet/internal/message"
 	"log"
 	"math"
 	"math/rand"
@@ -23,10 +23,6 @@ type Listener struct {
 	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
 	// simply discards the messages.
 	ErrorLog *log.Logger
-	// Protocol is the protocol of the RakNet listener. It will only accept clients that attempt to connect
-	// with this RakNet protocol version, and is one of the constants found in conn.go.
-	// Protocol is raknet.MinecraftProtocol by default.
-	Protocol byte
 
 	conn net.PacketConn
 	// incoming is a channel of incoming connections. Connections that end up in here will also end up in
@@ -46,9 +42,6 @@ type Listener struct {
 	// pongData is a byte slice of data that is sent in an unconnected pong packet each time the client sends
 	// and unconnected ping to the server.
 	pongData atomic.Value
-
-	// protocol is the RakNet protocol of the listener.
-	protocol byte
 }
 
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
@@ -68,13 +61,11 @@ func Listen(address string) (*Listener, error) {
 
 	listener := &Listener{
 		ErrorLog: log.New(os.Stderr, "", log.LstdFlags),
-		Protocol: MinecraftProtocol,
 		conn:     conn,
 		incoming: make(chan *Conn, 128),
 		closeCtx: ctx,
 		close:    cancel,
 		id:       rand.Int63(),
-		protocol: MinecraftProtocol,
 	}
 	listener.pongData.Store([]byte{})
 	go listener.listen()
@@ -162,11 +153,12 @@ func (listener *Listener) HijackPong(address string) error {
 		for {
 			select {
 			case <-ticker.C:
-				data, err := Dialer{Protocol: listener.Protocol}.Ping(address)
+				data, err := Ping(address)
 				if err != nil {
 					// It's okay if these packets are lost sometimes. There's no need to log this.
 					continue
 				}
+				//noinspection SpellCheckingInspection
 				if string(data[:4]) == "MCPE" {
 					fragments := bytes.Split(data, []byte{';'})
 					for len(fragments) < 9 {
@@ -230,11 +222,11 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			return fmt.Errorf("error reading packet ID byte: %v", err)
 		}
 		switch packetID {
-		case idUnconnectedPing:
+		case message.IDUnconnectedPing:
 			return listener.handleUnconnectedPing(b, addr)
-		case idOpenConnectionRequest1:
+		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
-		case idOpenConnectionRequest2:
+		case message.IDOpenConnectionRequest2:
 			return listener.handleOpenConnectionRequest2(b, addr)
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
@@ -245,31 +237,19 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		}
 		return nil
 	}
-	conn := value.(*Conn)
-	return conn.receive(b)
+	return value.(*Conn).receive(b)
 }
 
 // handleOpenConnectionRequest2 handles an open connection request 2 packet stored in buffer b, coming from
 // an address addr.
 func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net.Addr) error {
-	packet := &openConnectionRequest2{}
-	if err := packet.UnmarshalBinary(b.Bytes()); err != nil {
+	packet := &message.OpenConnectionRequest2{}
+	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading open connection request 2: %v", err)
 	}
 	b.Reset()
 
-	address := rakAddr(*addr.(*net.UDPAddr))
-	response := &openConnectionReply2{Magic: magic, ServerGUID: listener.id, ClientAddress: &address, MTUSize: packet.MTUSize}
-	if err := b.WriteByte(idOpenConnectionReply2); err != nil {
-		return fmt.Errorf("error writing open connection reply 2 ID: %v", err)
-	}
-	data, err := response.MarshalBinary()
-	if err != nil {
-		return fmt.Errorf("error writing open connection reply 2: %v", err)
-	}
-	if _, err := b.Write(data); err != nil {
-		return fmt.Errorf("error writing open connection reply 2 to buffer: %v", err)
-	}
+	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: packet.MTUSize}).Write(b)
 	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
@@ -290,67 +270,34 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 	// the size.
 	mtuSize := len(b.Bytes()) + 1
 
-	packet := &openConnectionRequest1{}
-	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+	packet := &message.OpenConnectionRequest1{}
+	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading open connection request 1: %v", err)
 	}
 	b.Reset()
 
-	if packet.Protocol != listener.protocol {
-		response := &incompatibleProtocolVersion{Magic: magic, ServerGUID: listener.id, ServerProtocol: listener.protocol}
-		if err := b.WriteByte(idIncompatibleProtocolVersion); err != nil {
-			return fmt.Errorf("error writing incompatible protocol version ID: %v", err)
-		}
-		if err := binary.Write(b, binary.BigEndian, response); err != nil {
-			return fmt.Errorf("error writing incompatible protocol version: %v", err)
-		}
-		if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
-			return fmt.Errorf("error sending incompatible protocol version: %v", err)
-		}
-		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, listener.protocol)
+	if packet.Protocol != currentProtocol {
+		(&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).Write(b)
+		_, _ = listener.conn.WriteTo(b.Bytes(), addr)
+		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, currentProtocol)
 	}
 
-	response := &openConnectionReply1{Magic: magic, ServerGUID: listener.id, MTUSize: int16(mtuSize) + 28}
-	if err := b.WriteByte(idOpenConnectionReply1); err != nil {
-		return fmt.Errorf("error writing open connection reply 1 ID: %v", err)
-	}
-	if err := binary.Write(b, binary.BigEndian, response); err != nil {
-		return fmt.Errorf("error writing open connection reply 1: %v", err)
-	}
-	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
-		return fmt.Errorf("error sending open connection reply 1: %v", err)
-	}
-	return nil
+	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, MTUSize: int16(mtuSize) + 28}).Write(b)
+	_, err := listener.conn.WriteTo(b.Bytes(), addr)
+	return err
 }
 
 // handleUnconnectedPing handles an unconnected ping packet stored in buffer b, coming from an address addr.
 func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) error {
-	packet := &unconnectedPing{}
-	if err := binary.Read(b, binary.BigEndian, packet); err != nil {
+	pk := &message.UnconnectedPing{}
+	if err := pk.Read(b); err != nil {
 		return fmt.Errorf("error reading unconnected ping: %v", err)
 	}
 	b.Reset()
 
-	pongData := listener.pongData.Load().([]byte)
-	response := &unconnectedPong{Magic: magic, ServerGUID: listener.id, SendTimestamp: packet.SendTimestamp}
-	if err := b.WriteByte(idUnconnectedPong); err != nil {
-		return fmt.Errorf("error writing unconnected pong ID: %v", err)
-	}
-	if err := binary.Write(b, binary.BigEndian, response); err != nil {
-		return fmt.Errorf("error writing unconnected pong: %v", err)
-	}
-	if listener.protocol == MinecraftProtocol {
-		if err := binary.Write(b, binary.BigEndian, int16(len(pongData))); err != nil {
-			return fmt.Errorf("error writing unconnected pong data length")
-		}
-	}
-	if _, err := b.Write(pongData); err != nil {
-		return fmt.Errorf("error writing pong data to buffer: %v", err)
-	}
-	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
-		return fmt.Errorf("error sending unconnected pong: %v", err)
-	}
-	return nil
+	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: listener.pongData.Load().([]byte)}).Write(b)
+	_, err := listener.conn.WriteTo(b.Bytes(), addr)
+	return err
 }
 
 // timestamp returns a timestamp in milliseconds.

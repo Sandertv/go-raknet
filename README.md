@@ -22,7 +22,7 @@ Basic RakNet server:
 package main
 
 import (
-	"github.com/sandertv/raknet"
+	"github.com/sandertv/go-raknet"
 )
 
 func main() {
@@ -51,6 +51,7 @@ import (
 )
 
 func main() {
+    //noinspection SpellCheckingInspection
     conn, _ := raknet.Dial("mco.mineplex.com:19132")
     defer conn.Close()
     
