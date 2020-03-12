@@ -47,7 +47,7 @@ Basic RakNet client:
 package main
 
 import (
-	"github.com/sandertv/raknet"
+	"github.com/sandertv/go-raknet"
 )
 
 func main() {
