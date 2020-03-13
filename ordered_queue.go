@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const DelayRecordCount = 40
+const delayRecordCount = 40
 
 // orderedQueue is a queue of byte slices that are taken out in an ordered way. No byte slice may be taken out
 // that has been inserted with an index if all indices below that aren't also taken out.
@@ -23,7 +23,7 @@ type orderedQueue struct {
 
 // newOrderedQueue returns a new initialised ordered queue.
 func newOrderedQueue() *orderedQueue {
-	return &orderedQueue{queue: make(map[uint24]interface{}), timestamps: make(map[uint24]time.Time), delays: make([]time.Duration, DelayRecordCount)}
+	return &orderedQueue{queue: make(map[uint24]interface{}), timestamps: make(map[uint24]time.Time), delays: make([]time.Duration, delayRecordCount)}
 }
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
@@ -50,7 +50,7 @@ func (queue *orderedQueue) take(index uint24) (val interface{}, ok bool) {
 		delete(queue.queue, index)
 		queue.delays[queue.ptr] = time.Now().Sub(queue.timestamps[index])
 		queue.ptr++
-		if queue.ptr == DelayRecordCount {
+		if queue.ptr == delayRecordCount {
 			queue.ptr = 0
 		}
 		delete(queue.timestamps, index)
@@ -115,7 +115,7 @@ func (queue *orderedQueue) Timestamp(sequenceNumber uint24) time.Time {
 }
 
 // AvgDelay returns the average delay between the putting of the value into the ordered queue and the taking
-// out of it again. It is measured over the last DelayRecordCount values put in.
+// out of it again. It is measured over the last delayRecordCount values put in.
 func (queue *orderedQueue) AvgDelay() time.Duration {
 	var average, records time.Duration
 	for _, delay := range queue.delays {
