@@ -20,7 +20,7 @@ func Dial(address string) (*Conn, error) {
 	return Dialer{}.Dial(address)
 }
 
-// sendPing sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
+// Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
@@ -37,7 +37,7 @@ type Dialer struct {
 	ErrorLog *log.Logger
 }
 
-// sendPing sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
+// Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
