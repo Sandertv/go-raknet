@@ -26,7 +26,6 @@ import (
 )
 
 func main() {
-	// We start a listener with in this case a specific protocol.
     listener, _ := raknet.Listen("0.0.0.0:19132")
     defer listener.Close()
     for {
@@ -51,7 +50,6 @@ import (
 )
 
 func main() {
-    //noinspection SpellCheckingInspection
     conn, _ := raknet.Dial("mco.mineplex.com:19132")
     defer conn.Close()
     
