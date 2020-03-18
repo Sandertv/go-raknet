@@ -26,7 +26,7 @@ const (
 	resendRequestThreshold = 10
 	// tickInterval is the interval at which the connection sends an ACK containing the packets which were
 	// received or a NACK for missing packets.
-	tickInterval = time.Second / 100
+	tickInterval = time.Second / 20
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = time.Second * 4
 )
