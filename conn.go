@@ -628,7 +628,7 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 	if p.splitIndex > uint32(len(m)-1) {
 		// The split index was either negative or was bigger than the slice size, meaning the packet is
 		// invalid.
-		return fmt.Errorf("error handing split packet: split ID %v is out of range (0 - %v)", p.splitID, len(m)-1)
+		return fmt.Errorf("error handing split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(m)-1)
 	}
 	m[p.splitIndex] = p.content
 
