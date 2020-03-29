@@ -604,9 +604,7 @@ func (conn *Conn) handleConnectionRequest(b *bytes.Buffer) error {
 // an error if not successful.
 func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 	packet := &message.ConnectionRequestAccepted{}
-	if err := packet.Read(b); err != nil {
-		return fmt.Errorf("error reading connection request accepted: %v", err)
-	}
+	_ = packet.Read(b)
 	b.Reset()
 
 	(&message.NewIncomingConnection{ServerAddress: *conn.addr.(*net.UDPAddr), RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: packet.AcceptedTimestamp, SystemAddresses: packet.SystemAddresses}).Write(b)

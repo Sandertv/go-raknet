@@ -54,17 +54,10 @@ func writeAddr(buffer *bytes.Buffer, addr net.UDPAddr) {
 	} else {
 		_ = binary.Write(buffer, binary.BigEndian, int16(23))
 		_ = binary.Write(buffer, binary.BigEndian, int16(addr.Port))
-		// The IPv6 address is enclosed in two 0 integers, which we represent with an empty 4 length byte
-		// slice.
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
+		// The IPv6 address is enclosed in two 0 integers.
+		_ = binary.Write(buffer, binary.BigEndian, int32(0))
 		_, _ = buffer.Write(addr.IP.To16())
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
-		_ = buffer.WriteByte(0)
+		_ = binary.Write(buffer, binary.BigEndian, int32(0))
 	}
 }
 
@@ -87,23 +80,17 @@ func readAddr(buffer *bytes.Buffer, addr *net.UDPAddr) error {
 		}
 		addr.Port = int(port)
 	} else {
-		// Pass the first short, we don't care about it.
 		buffer.Next(2)
 		var port int16
 		if err := binary.Read(buffer, binary.BigEndian, &port); err != nil {
 			return fmt.Errorf("error reading raknet address port: %v", err)
 		}
 		addr.Port = int(port)
-
-		// Pass the integer at this offset.
 		buffer.Next(4)
-
 		addr.IP = make([]byte, 16)
 		if _, err := buffer.Read(addr.IP); err != nil {
 			return fmt.Errorf("error reading raknet address ipv6 bytes: %v", err)
 		}
-
-		// Pass another integer at this offset.
 		buffer.Next(4)
 	}
 	return nil
