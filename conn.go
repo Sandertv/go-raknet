@@ -300,6 +300,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
 func (conn *Conn) Close() error {
+	_, _ = conn.Write([]byte{message.IDDisconnectNotification})
 	conn.close()
 	return nil
 }
@@ -353,18 +354,6 @@ func (conn *Conn) sendPing() {
 	b := bytes.NewBuffer(nil)
 	(&message.ConnectedPing{ClientTimestamp: timestamp()}).Write(b)
 	_, _ = conn.Write(b.Bytes())
-}
-
-// SimulatePacketLoss makes the connection simulate packet loss, with a loss chance passed. It will start
-// to discard packets randomly depending on the loss chance, both for sending and for receiving packets.
-// The function panics if a loss change is higher than 1 or lower than 0.
-func (conn *Conn) SimulatePacketLoss(lossChance float64) {
-	if lossChance > 1 || lossChance < 0 {
-		panic(fmt.Sprintf("packet loss must be between 0-1, but got %v", lossChance))
-	}
-	conn.packetLossChance.Store(lossChance)
-	conn.readRand = rand.New(rand.NewSource(time.Now().Unix()))
-	conn.writeRand = rand.New(rand.NewSource(time.Now().Unix()))
 }
 
 // packetPool is a sync.Pool used to pool packets that encapsulate their content.
