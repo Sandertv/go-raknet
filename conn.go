@@ -16,7 +16,7 @@ import (
 
 const (
 	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
-	currentProtocol byte = 9
+	currentProtocol byte = 10
 
 	// connTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
 	// duration.
