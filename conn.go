@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
-	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -85,11 +84,6 @@ type Conn struct {
 	// latency is the last measured latency between both ends of the connection. Note that this latency is
 	// not the round-trip time, but half of that.
 	latency atomic.Value
-	// packetLossChance is a percentage from 0-1 that specifies the chance that a packet read or written may
-	// be lost.
-	packetLossChance atomic.Value
-	readRand         *rand.Rand
-	writeRand        *rand.Rand
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
@@ -149,7 +143,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		readPacket:         &packet{},
 	}
 	c.latency.Store(10)
-	c.packetLossChance.Store(0.0)
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
 	go c.startTicking()
@@ -207,7 +200,7 @@ func (conn *Conn) checkResend() {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
-	_ = conn.resend(resendSeqNums)
+	_ = conn.resend(resendSeqNums) // NOP if len(resendSeqNums) == 0.
 	conn.writeLock.Unlock()
 }
 
@@ -264,11 +257,8 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("error writing packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
-		v := conn.packetLossChance.Load().(float64)
-		if v == 0 || conn.writeRand.Float64() > v {
-			if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
-				return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
-			}
+		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
 		conn.writeBuffer.Reset()
@@ -407,11 +397,6 @@ func (conn *Conn) split(b []byte) [][]byte {
 // receive receives a packet from the connection, handling it as appropriate. If not successful, an error is
 // returned.
 func (conn *Conn) receive(b *bytes.Buffer) error {
-	v := conn.packetLossChance.Load().(float64)
-	if v != 0 && conn.readRand.Float64() < v {
-		// Random discard.
-		return nil
-	}
 	headerFlags, err := b.ReadByte()
 	if err != nil {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
@@ -619,32 +604,24 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 	}
 	m[p.splitIndex] = p.content
 
-	for _, splitPacket := range m {
-		if len(splitPacket) == 0 {
+	size := 0
+	for _, fragment := range m {
+		if len(fragment) == 0 {
 			// We haven't yet received all split fragments, so we cannot put the packets together yet.
 			return nil
 		}
+		// First we calculate the total size required to hold the content of the combined content.
+		size += len(fragment)
 	}
 
-	totalSize := 0
-	for _, splitPacket := range m {
-		// First we calculate the total size required to hold the content of the combined content.
-		totalSize += len(splitPacket)
+	content := make([]byte, 0, size)
+	for _, fragment := range m {
+		content = append(content, fragment...)
 	}
-	fullContent := make([]byte, totalSize)
-	currentOffset := 0
-	for _, splitPacket := range m {
-		// We finally copy the packet into our new full content slice and make sure it is copied at the
-		// correct offset.
-		contentLength := len(splitPacket)
-		if n := copy(fullContent[currentOffset:], splitPacket); n != contentLength {
-			panic(fmt.Sprintf("invalid length full split packet content byte slice produced: should have copied %v, but only copied %v", contentLength, n))
-		}
-		currentOffset += contentLength
-	}
+
 	delete(conn.splits, p.splitID)
 
-	p.content = fullContent
+	p.content = content
 	return conn.receivePacket(p)
 }
 
@@ -717,8 +694,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		val, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
 		if !ok {
 			// We could not resend this datagram. Maybe it was already resent before at the request of the
-			// client. We set the error and continue.
-			err = fmt.Errorf("error recovering NACK for sequence number %v", sequenceNumber)
+			// client. This is generally expected so we just continue.
 			continue
 		}
 		packet := val.(*packet)
@@ -737,11 +713,8 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		}
 
 		// We then send the packet to the connection.
-		v := conn.packetLossChance.Load().(float64)
-		if v == 0 || conn.writeRand.Float64() > v {
-			if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
-				return fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
-			}
+		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+			return fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
