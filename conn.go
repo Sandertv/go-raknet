@@ -467,7 +467,7 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		return conn.handlePacket(packet.content)
 	}
 	if err := conn.packetQueue.put(packet.orderIndex, packet.content); err != nil {
-		if packet.orderIndex == 0 {
+		if packet.orderIndex == 0 && !conn.packetQueue.zeroRecv {
 			return conn.handlePacket(packet.content)
 		}
 		// Don't return these errors. We'll have a packet that was sent either multiple times, arrived
