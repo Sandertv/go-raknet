@@ -279,7 +279,9 @@ func (state *connState) discoverMTUSize() (e error) {
 				return fmt.Errorf("error reading open connection reply 1: %v", err)
 			}
 			if response.MTUSize < 400 || response.MTUSize > 1500 {
-				return fmt.Errorf("invalid MTU size %v received in open connection reply 1", response.MTUSize)
+				e = fmt.Errorf("invalid MTU size %v received in open connection reply 1", response.MTUSize)
+				// Just try again. Some servers for some reason send broken MTU sizes in the first packet.
+				continue
 			}
 			state.mtuSize = response.MTUSize
 			return

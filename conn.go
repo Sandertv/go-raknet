@@ -120,8 +120,8 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address passed.
 func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn {
-	if mtuSize < 500 {
-		mtuSize = 500
+	if mtuSize < 500 || mtuSize > 1500 {
+		mtuSize = 1492
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())
