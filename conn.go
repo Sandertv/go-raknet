@@ -74,6 +74,7 @@ type Conn struct {
 	// completingSequence is a Context which is completed once the RakNet connection sequence is completed.
 	completingSequence context.Context
 	finishSequence     context.CancelFunc
+	connected          bool
 
 	// id is the random client GUID of the client. It is different each time a client connects to to a server.
 	id int64
@@ -493,11 +494,21 @@ func (conn *Conn) handlePacket(b []byte) error {
 
 	switch id {
 	case message.IDConnectionRequest:
+		if conn.connected {
+			return nil
+		}
 		return conn.handleConnectionRequest(buffer)
 	case message.IDConnectionRequestAccepted:
+		if conn.connected {
+			return nil
+		}
 		return conn.handleConnectionRequestAccepted(buffer)
 	case message.IDNewIncomingConnection:
+		if conn.connected {
+			return nil
+		}
 		conn.finishSequence()
+		conn.connected = true
 	case message.IDConnectedPing:
 		return conn.handleConnectedPing(buffer)
 	case message.IDConnectedPong:
@@ -582,6 +593,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 	_, err := conn.Write(b.Bytes())
 
 	conn.finishSequence()
+	conn.connected = true
 	return err
 }
 
