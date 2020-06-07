@@ -7,9 +7,7 @@ import (
 
 func Test_uint24(t *testing.T) {
 	b := bytes.NewBuffer(nil)
-	if err := writeUint24(b, 123456); err != nil {
-		t.Fatalf("error writing uint24: %v", err)
-	}
+	writeUint24(b, 123456)
 	val, err := readUint24(b)
 	if err != nil {
 		t.Fatalf("error reading uint24: %v", err)

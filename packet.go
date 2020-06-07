@@ -67,19 +67,13 @@ func (packet *packet) write(b *bytes.Buffer) error {
 		return fmt.Errorf("error writing packet content length: %v", err)
 	}
 	if packet.reliable() {
-		if err := writeUint24(b, packet.messageIndex); err != nil {
-			return fmt.Errorf("error writing packet message index: %v", err)
-		}
+		writeUint24(b, packet.messageIndex)
 	}
 	if packet.sequenced() {
-		if err := writeUint24(b, packet.sequenceIndex); err != nil {
-			return fmt.Errorf("error writing packet sequence index: %v", err)
-		}
+		writeUint24(b, packet.sequenceIndex)
 	}
 	if packet.sequencedOrOrdered() {
-		if err := writeUint24(b, packet.orderIndex); err != nil {
-			return fmt.Errorf("error writing packet order index: %v", err)
-		}
+		writeUint24(b, packet.orderIndex)
 		// Order channel, we don't care about this.
 		_ = b.WriteByte(0)
 	}
@@ -237,9 +231,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 				if err := buffer.WriteByte(packetSingle); err != nil {
 					return err
 				}
-				if err := writeUint24(buffer, firstPacketInRange); err != nil {
-					return err
-				}
+				writeUint24(buffer, firstPacketInRange)
 
 				firstPacketInRange = packet
 				lastPacketInRange = packet
@@ -249,12 +241,8 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 				if err := buffer.WriteByte(packetRange); err != nil {
 					return err
 				}
-				if err := writeUint24(buffer, firstPacketInRange); err != nil {
-					return err
-				}
-				if err := writeUint24(buffer, lastPacketInRange); err != nil {
-					return err
-				}
+				writeUint24(buffer, firstPacketInRange)
+				writeUint24(buffer, lastPacketInRange)
 
 				firstPacketInRange = packet
 				lastPacketInRange = packet
@@ -270,19 +258,13 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 		if err := buffer.WriteByte(packetSingle); err != nil {
 			return err
 		}
-		if err := writeUint24(buffer, firstPacketInRange); err != nil {
-			return err
-		}
+		writeUint24(buffer, firstPacketInRange)
 	} else {
 		if err := buffer.WriteByte(packetRange); err != nil {
 			return err
 		}
-		if err := writeUint24(buffer, firstPacketInRange); err != nil {
-			return err
-		}
-		if err := writeUint24(buffer, lastPacketInRange); err != nil {
-			return err
-		}
+		writeUint24(buffer, firstPacketInRange)
+		writeUint24(buffer, lastPacketInRange)
 	}
 	recordCount++
 	if err := binary.Write(b, binary.BigEndian, recordCount); err != nil {
