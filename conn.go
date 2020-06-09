@@ -139,7 +139,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn 
 		recoveryQueue:      newOrderedQueue(),
 		close:              cancel,
 		closeCtx:           ctx,
-		packetChan:         make(chan *bytes.Buffer),
+		packetChan:         make(chan *bytes.Buffer, 128),
 		writeBuffer:        bytes.NewBuffer(nil),
 		readPacket:         &packet{},
 	}
@@ -524,9 +524,12 @@ func (conn *Conn) handlePacket(b []byte) error {
 		// Insert the packet contents the packet queue could release in the channel so that Conn.Read() can
 		// get a hold of them.
 		select {
-		case conn.packetChan <- buffer:
 		case <-conn.closeCtx.Done():
 			return nil
+		case conn.packetChan <- buffer:
+			// Don't do anything.
+		default:
+			return fmt.Errorf("too many unhandled packets pending")
 		}
 
 	}
