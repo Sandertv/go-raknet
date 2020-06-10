@@ -266,15 +266,12 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 // handleOpenConnectionRequest1 handles an open connection request 1 packet stored in buffer b, coming from
 // an address addr.
 func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net.Addr) error {
-	// mtuSize is the total size of the buffer. We already read the packet ID byte, so we need to add that to
-	// the size.
-	mtuSize := len(b.Bytes()) + 1
-
 	packet := &message.OpenConnectionRequest1{}
 	if err := packet.Read(b); err != nil {
 		return fmt.Errorf("error reading open connection request 1: %v", err)
 	}
 	b.Reset()
+	mtuSize := packet.MTUSize
 
 	if packet.Protocol != currentProtocol {
 		(&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).Write(b)
@@ -282,7 +279,7 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, currentProtocol)
 	}
 
-	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, MTUSize: int16(mtuSize) + 28}).Write(b)
+	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, MTUSize: mtuSize}).Write(b)
 	_, err := listener.conn.WriteTo(b.Bytes(), addr)
 	return err
 }

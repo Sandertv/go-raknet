@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log"
@@ -198,7 +199,7 @@ func (state *connState) openConnectionRequest() (e error) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := state.sendOpenConnectionRequest2(); err != nil {
+				if err := state.sendOpenConnectionRequest2(state.mtuSize); err != nil {
 					e = err
 					return
 				}
@@ -239,22 +240,30 @@ func (state *connState) openConnectionRequest() (e error) {
 func (state *connState) discoverMTUSize() (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
-	stop := make(chan bool, 1)
+	var staticMTU int16
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
-		stop <- true
+		cancel()
 	}()
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := state.sendOpenConnectionRequest1(); err != nil {
+				mtu := state.discoveringMTUSize
+				if staticMTU != 0 {
+					mtu = staticMTU
+				}
+				if err := state.sendOpenConnectionRequest1(mtu); err != nil {
 					e = err
 					return
 				}
-				// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
-				// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
-				state.discoveringMTUSize -= 40
-			case <-stop:
+				if staticMTU == 0 {
+					// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
+					// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
+					state.discoveringMTUSize -= 40
+				}
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -279,8 +288,10 @@ func (state *connState) discoverMTUSize() (e error) {
 				return fmt.Errorf("error reading open connection reply 1: %v", err)
 			}
 			if response.MTUSize < 400 || response.MTUSize > 1500 {
-				e = fmt.Errorf("invalid MTU size %v received in open connection reply 1", response.MTUSize)
-				// Just try again. Some servers for some reason send broken MTU sizes in the first packet.
+				// This is an awful hack we cooked up to deal with OVH 'DDoS' protection. For some reason they
+				// send a broken MTU size first. Sending a Request2 followed by a Request1 deals with this.
+				_ = state.sendOpenConnectionRequest2(response.MTUSize)
+				staticMTU = state.discoveringMTUSize + 40
 				continue
 			}
 			state.mtuSize = response.MTUSize
@@ -297,18 +308,18 @@ func (state *connState) discoverMTUSize() (e error) {
 
 // sendOpenConnectionRequest2 sends an open connection request 2 packet to the server. If not successful, an
 // error is returned.
-func (state *connState) sendOpenConnectionRequest2() error {
+func (state *connState) sendOpenConnectionRequest2(mtu int16) error {
 	b := bytes.NewBuffer(nil)
-	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), MTUSize: state.mtuSize, ClientGUID: state.id}).Write(b)
+	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), MTUSize: mtu, ClientGUID: state.id}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
 	return err
 }
 
 // sendOpenConnectionRequest1 sends an open connection request 1 packet to the server. If not successful, an
 // error is returned.
-func (state *connState) sendOpenConnectionRequest1() error {
+func (state *connState) sendOpenConnectionRequest1(mtu int16) error {
 	b := bytes.NewBuffer(nil)
-	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MTUSize: state.discoveringMTUSize}).Write(b)
+	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MTUSize: mtu}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
 	return err
 }
