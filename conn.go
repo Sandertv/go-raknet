@@ -58,8 +58,9 @@ func ErrReadTimeout(err error) bool {
 // but rather a connection emulated using RakNet.
 // Methods may be called on Conn from multiple goroutines simultaneously.
 type Conn struct {
-	conn net.PacketConn
-	addr net.Addr
+	conn   net.PacketConn
+	client bool
+	addr   net.Addr
 
 	writeLock   sync.Mutex
 	writeBuffer *bytes.Buffer
@@ -120,13 +121,14 @@ type Conn struct {
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
-func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64) *Conn {
+func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client bool) *Conn {
 	if mtuSize < 500 || mtuSize > 1500 {
 		mtuSize = 1492
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())
 	c := &Conn{
+		client:             client,
 		addr:               addr,
 		conn:               conn,
 		mtuSize:            mtuSize,
@@ -466,6 +468,9 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		return conn.handlePacket(packet.content)
 	}
 	if err := conn.packetQueue.put(packet.orderIndex, packet.content); err != nil {
+		if packet.orderIndex == 0 && !conn.packetQueue.zeroRecv {
+			return conn.handlePacket(packet.content)
+		}
 		// Don't return these errors. We'll have a packet that was sent either multiple times, arrived
 		// multiple times or something else. These aren't critical errors.
 		return nil
@@ -523,15 +528,21 @@ func (conn *Conn) handlePacket(b []byte) error {
 		}
 		// Insert the packet contents the packet queue could release in the channel so that Conn.Read() can
 		// get a hold of them.
+		if conn.client {
+			select {
+			case conn.packetChan <- buffer:
+			case <-conn.closeCtx.Done():
+				return nil
+			}
+			return nil
+		}
 		select {
+		case conn.packetChan <- buffer:
 		case <-conn.closeCtx.Done():
 			return nil
-		case conn.packetChan <- buffer:
-			// Don't do anything.
 		default:
-			return fmt.Errorf("too many unhandled packets pending")
+			return fmt.Errorf("too many packets left unhandled")
 		}
-
 	}
 	return nil
 }

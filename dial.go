@@ -111,7 +111,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 		return nil, fmt.Errorf("error receiving open connection reply: %v", err)
 	}
 
-	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), state.mtuSize, id)
+	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), state.mtuSize, id, true)
 	go func() {
 		// Wait for the connection to be closed...
 		<-conn.closeCtx.Done()

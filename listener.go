@@ -254,7 +254,7 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
 
-	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID)
+	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID, false)
 	listener.connections.Store(addr.String(), conn)
 
 	// Add the connection to the incoming channel so that a caller of Accept() can receive it.
