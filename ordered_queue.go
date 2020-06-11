@@ -15,6 +15,9 @@ type orderedQueue struct {
 	timestamps   map[uint24]time.Time
 	lowestIndex  uint24
 	highestIndex uint24
+	lastClean    time.Time
+
+	zeroRecv bool
 
 	ptr    int
 	delays []time.Duration
@@ -27,6 +30,9 @@ func newOrderedQueue() *orderedQueue {
 
 // put puts a value at the index passed. If the index was already occupied once, an error is returned.
 func (queue *orderedQueue) put(index uint24, value interface{}) error {
+	if index == 0 {
+		queue.zeroRecv = true
+	}
 	if index < queue.lowestIndex {
 		return fmt.Errorf("cannot set value at index %v: already taken out", index)
 	}
