@@ -46,7 +46,7 @@ func writeAddr(buffer *bytes.Buffer, addr net.UDPAddr) {
 	if ver == 4 {
 		ipBytes := addr.IP.To4()
 
-		_ = buffer.WriteByte(ipBytes[0])
+		_ = buffer.WriteByte(^ipBytes[0])
 		_ = buffer.WriteByte(^ipBytes[1])
 		_ = buffer.WriteByte(^ipBytes[2])
 		_ = buffer.WriteByte(^ipBytes[3])
