@@ -211,9 +211,21 @@ func (conn *Conn) checkResend() {
 // length of the bytes written if the write was successful. If not, an error is returned and n is 0.
 // Write may be called simultaneously from multiple goroutines, but will write one by one.
 func (conn *Conn) Write(b []byte) (n int, err error) {
-	conn.writeLock.Lock()
-	defer conn.writeLock.Unlock()
+	select {
+	case <-conn.closeCtx.Done():
+		return 0, errors.New(errConnectionClosed)
+	default:
+		conn.writeLock.Lock()
+		defer conn.writeLock.Unlock()
+		return conn.write(b)
+	}
+}
 
+// write writes a buffer b over the RakNet connection. The amount of bytes written n is always equal to the
+// length of the bytes written if the write was successful. If not, an error is returned and n is 0.
+// Write may be called simultaneously from multiple goroutines, but will write one by one.
+// Unlike Write, write will not lock.
+func (conn *Conn) write(b []byte) (n int, err error) {
 	fragments := conn.split(b)
 	orderIndex := conn.sendOrderIndex
 	conn.sendOrderIndex++

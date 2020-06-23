@@ -88,8 +88,10 @@ accept:
 	case <-conn.completingSequence.Done():
 		go func() {
 			<-conn.closeCtx.Done()
-			// Insert the boolean back in the channel so that other readers of the channel also receive
-			// the signal.
+			if err := conn.conn.Close(); err != nil {
+				// Should never happen.
+				panic(err)
+			}
 			listener.connections.Delete(conn.addr.String())
 		}()
 		return conn, nil
@@ -237,7 +239,14 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		}
 		return nil
 	}
-	return value.(*Conn).receive(b)
+	conn := value.(*Conn)
+	select {
+	case <-conn.closeCtx.Done():
+		// Connection was closed already.
+		return nil
+	default:
+		return value.(*Conn).receive(b)
+	}
 }
 
 // handleOpenConnectionRequest2 handles an open connection request 2 packet stored in buffer b, coming from
