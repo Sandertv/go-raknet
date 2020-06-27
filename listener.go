@@ -250,10 +250,7 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 
 	go func() {
 		<-conn.closeCtx.Done()
-		if err := conn.conn.Close(); err != nil {
-			// Should never happen.
-			panic(err)
-		}
+		_ = conn.conn.Close()
 		listener.connections.Delete(conn.addr.String())
 	}()
 	go func() {
