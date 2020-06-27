@@ -77,29 +77,11 @@ func Listen(address string) (*Listener, error) {
 // connection that is ready to send and receive data. If not successful, a nil listener is returned and an error
 // describing the problem.
 func (listener *Listener) Accept() (net.Conn, error) {
-accept:
 	conn, ok := <-listener.incoming
 	if !ok {
 		return nil, fmt.Errorf("error accepting connection: listener closed")
 	}
-	select {
-	case <-listener.closeCtx.Done():
-		return nil, fmt.Errorf("error accepting connection: listener closed")
-	case <-conn.completingSequence.Done():
-		go func() {
-			<-conn.closeCtx.Done()
-			if err := conn.conn.Close(); err != nil {
-				// Should never happen.
-				panic(err)
-			}
-			listener.connections.Delete(conn.addr.String())
-		}()
-		return conn, nil
-	case <-time.After(time.Second * 10):
-		// It took too long to complete this connection. We closeCtx it and go back to accepting.
-		_ = conn.Close()
-		goto accept
-	}
+	return conn, nil
 }
 
 // Addr returns the address the Listener is bound to and listening for connections on.
@@ -266,8 +248,26 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID, false)
 	listener.connections.Store(addr.String(), conn)
 
-	// Add the connection to the incoming channel so that a caller of Accept() can receive it.
-	listener.incoming <- conn
+	go func() {
+		<-conn.closeCtx.Done()
+		if err := conn.conn.Close(); err != nil {
+			// Should never happen.
+			panic(err)
+		}
+		listener.connections.Delete(conn.addr.String())
+	}()
+	go func() {
+		select {
+		case <-conn.completingSequence.Done():
+			// Add the connection to the incoming channel so that a caller of Accept() can receive it.
+			listener.incoming <- conn
+		case <-listener.closeCtx.Done():
+			_ = conn.Close()
+		case <-time.After(time.Second * 10):
+			// It took too long to complete this connection. We close it and go back to accepting.
+			_ = conn.Close()
+		}
+	}()
 
 	return nil
 }
