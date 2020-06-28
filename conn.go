@@ -168,7 +168,7 @@ func (conn *Conn) startTicking() {
 		case t := <-ticker.C:
 			// We first check if the other end has actually timed out. If so, we close the conn, as it is
 			// likely the client was disconnected.
-			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > connTimeout && !conn.client {
+			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > connTimeout {
 				// If the timeout was long enough, we close the connection.
 				_ = conn.Close()
 				return
