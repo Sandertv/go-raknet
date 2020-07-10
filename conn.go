@@ -17,9 +17,12 @@ const (
 	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
 	currentProtocol byte = 10
 
-	// connTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
+	// serverTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
 	// duration.
-	connTimeout = time.Second * 7
+	serverTimeout = time.Second * 7
+	// clientTimeout is the timeout after which a Conn from Dial() times out, if it hasn't received a packet
+	// for that duration.
+	clientTimeout = serverTimeout * 2
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
@@ -58,9 +61,10 @@ func ErrReadTimeout(err error) bool {
 // but rather a connection emulated using RakNet.
 // Methods may be called on Conn from multiple goroutines simultaneously.
 type Conn struct {
-	conn   net.PacketConn
-	client bool
-	addr   net.Addr
+	conn    net.PacketConn
+	client  bool
+	addr    net.Addr
+	timeout time.Duration
 
 	writeLock   sync.Mutex
 	writeBuffer *bytes.Buffer
@@ -129,6 +133,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())
 	c := &Conn{
 		client:             client,
+		timeout:            serverTimeout,
 		addr:               addr,
 		conn:               conn,
 		mtuSize:            mtuSize,
@@ -144,6 +149,9 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		packetChan:         make(chan *bytes.Buffer, 128),
 		writeBuffer:        bytes.NewBuffer(nil),
 		readPacket:         &packet{},
+	}
+	if client {
+		c.timeout = clientTimeout
 	}
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
@@ -167,7 +175,7 @@ func (conn *Conn) startTicking() {
 		case t := <-ticker.C:
 			// We first check if the other end has actually timed out. If so, we close the conn, as it is
 			// likely the client was disconnected.
-			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > connTimeout {
+			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > conn.timeout {
 				// If the timeout was long enough, we close the connection.
 				_ = conn.Close()
 				return
@@ -477,6 +485,9 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 // receivePacket handles the receiving of a packet. It puts the packet in the queue and takes out all packets
 // that were obtainable after that, and handles them.
 func (conn *Conn) receivePacket(packet *packet) error {
+	// Update the last time we received a packet so that the connection doesn't time out.
+	conn.lastPacketTime.Store(time.Now())
+
 	if packet.reliability != reliabilityReliableOrdered {
 		// If it isn't a reliable ordered packet, handle it immediately.
 		return conn.handlePacket(packet.content)
@@ -505,9 +516,6 @@ func (conn *Conn) handlePacket(b []byte) error {
 	if err != nil {
 		return fmt.Errorf("error reading packet ID: %v", err)
 	}
-
-	// Update the last time we received a packet so that the connection doesn't time out.
-	conn.lastPacketTime.Store(time.Now())
 
 	switch id {
 	case message.IDConnectionRequest:
