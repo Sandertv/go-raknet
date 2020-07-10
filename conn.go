@@ -84,8 +84,8 @@ type Conn struct {
 	mtuSize int16
 
 	// latency is the last measured latency between both ends of the connection. Note that this latency is
-	// not the round-trip time, but half of that.
-	latency atomic.Value
+	// not the round-trip time, but half of that. The latency is measured in nanoseconds.
+	latency uint32
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
@@ -145,7 +145,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		writeBuffer:        bytes.NewBuffer(nil),
 		readPacket:         &packet{},
 	}
-	c.latency.Store(10)
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
 	go c.startTicking()
@@ -194,8 +193,12 @@ func (conn *Conn) checkResend() {
 	}
 	conn.writeLock.Lock()
 	var resendSeqNums []uint24
+
+	latency := conn.recoveryQueue.AvgDelay()
+	atomic.StoreUint32(&conn.latency, uint32(latency/2))
+
 	// Allow the average delay with a deviation of 200%.
-	delay := conn.recoveryQueue.AvgDelay() * 3
+	delay := latency * 3
 	for seqNum := range conn.recoveryQueue.queue {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
@@ -345,11 +348,10 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 	return conn.SetReadDeadline(t)
 }
 
-// Latency returns the last measured latency between both ends of the connection in milliseconds. The latency
-// is updated every 4 seconds. The latency returned is the time it takes to send one packet from one end to
-// the other end of the connection. It is not the round-trip time.
-func (conn *Conn) Latency() int {
-	return conn.latency.Load().(int)
+// Latency returns a rolling average of latency between the sending and the receiving end of the connection.
+// The latency returned is updated continuously and is half the round trip time (RTT).
+func (conn *Conn) Latency() time.Duration {
+	return time.Duration(atomic.LoadUint32(&conn.latency))
 }
 
 // sendPing pings the connection, updating the latency of the Conn if successful.
@@ -586,10 +588,8 @@ func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
 	if packet.ClientTimestamp > now {
 		return fmt.Errorf("error measuring latency: ping timestamp is in the future")
 	}
-	// We measure the latency for a single packet from one end to another, not the round-trip time, so we
-	// divide the total time by 2.
-	conn.latency.Store(int(now-packet.ClientTimestamp) / 2)
-
+	// We don't actually use the ConnectedPong to measure latency. It is too unreliable and doesn't give a
+	// good idea of the connection quality.
 	return nil
 }
 
