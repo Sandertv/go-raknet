@@ -42,6 +42,10 @@ type Listener struct {
 	// pongData is a byte slice of data that is sent in an unconnected pong packet each time the client sends
 	// and unconnected ping to the server.
 	pongData atomic.Value
+
+	// The maximum allowed mtusize for client connections. Default is 1500.
+	// Useful if a proxy is being implemented to match the MTU of the both sides of the proxy.
+	maxMtuSize int16
 }
 
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
@@ -66,6 +70,7 @@ func Listen(address string) (*Listener, error) {
 		closeCtx: ctx,
 		close:    cancel,
 		id:       rand.Int63(),
+                maxMtuSize: 1500,
 	}
 	listener.pongData.Store([]byte{})
 	go listener.listen()
@@ -73,10 +78,42 @@ func Listen(address string) (*Listener, error) {
 	return listener, nil
 }
 
+// ListenWithMaxMtu listens on the address passed and returns a listener that may be used to accept connections. If not
+// successful, an error is returned.
+// The address follows the same rules as those defined in the net.TCPListen() function.
+// Specific features of the listener may be modified once it is returned, such as the used ErrorLog and/or the
+// accepted protocol.
+// maxMtuSize limits the MTU of the connection with clients, default is 1500.
+func ListenWithMaxMtu(address string, maxMtuSize int16) (*Listener, error) {
+	conn, err := net.ListenPacket("udp", address)
+	if err != nil {
+		return nil, fmt.Errorf("error creating UDP listener: %v", err)
+	}
+
+	// Seed the global rand so we can get a random ID.
+	rand.Seed(time.Now().Unix())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	listener := &Listener{
+		ErrorLog:   log.New(os.Stderr, "", log.LstdFlags),
+		conn:       conn,
+		incoming:   make(chan *Conn, 128),
+		closeCtx:   ctx,
+		close:      cancel,
+		id:         rand.Int63(),
+		maxMtuSize: maxMtuSize,
+	}
+	listener.pongData.Store([]byte{})
+	go listener.listen()
+
+	return listener, nil
+}
+
+
 // Accept blocks until a connection can be accepted by the listener. If successful, Accept returns a
 // connection that is ready to send and receive data. If not successful, a nil listener is returned and an error
 // describing the problem.
-func (listener *Listener) Accept() (net.Conn, error) {
+func (listener *Listener) Accept() (*Conn, error) {
 	conn, ok := <-listener.incoming
 	if !ok {
 		return nil, fmt.Errorf("error accepting connection: listener closed")
@@ -240,7 +277,12 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 	}
 	b.Reset()
 
-	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: packet.MTUSize}).Write(b)
+	mtuSize := packet.MTUSize
+	if mtuSize > listener.maxMtuSize {
+		mtuSize = listener.maxMtuSize
+	}
+
+	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: mtuSize}).Write(b)
 	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
@@ -277,6 +319,9 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 	}
 	b.Reset()
 	mtuSize := packet.MTUSize
+	if mtuSize > listener.maxMtuSize {
+		mtuSize = listener.maxMtuSize
+	}
 
 	if packet.Protocol != currentProtocol {
 		(&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).Write(b)

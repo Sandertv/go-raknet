@@ -321,6 +321,11 @@ func (conn *Conn) LocalAddr() net.Addr {
 	return conn.conn.LocalAddr()
 }
 
+// MtuSize returns the mtu size of the connection.
+func (conn *Conn) MtuSize() int16 {
+	return conn.mtuSize
+}
+
 // SetReadDeadline sets the read deadline of the connection. An error is returned only if the time passed is
 // before time.Now().
 // Calling SetReadDeadline means the next Read call that exceeds the deadline will fail and return an error.

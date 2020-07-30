@@ -18,7 +18,16 @@ import (
 // connection will timeout and an error will be returned.
 // Dial fills out a Dialer struct with a default error logger and raknet.currentProtocol as protocol.
 func Dial(address string) (*Conn, error) {
-	return Dialer{}.Dial(address)
+	return Dialer{}.Dial(address, 1496)
+}
+
+// DialWithMaxMtu attempts to dial a RakNet connection to the address and mtu passed. The address may be either an IP address
+// or a hostname, combined with a port that is separated with ':'.
+// Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
+// connection will timeout and an error will be returned.
+// Dial fills out a Dialer struct with a default error logger and raknet.currentProtocol as protocol.
+func DialWithMaxMtu(address string, maxMtu int16) (*Conn, error) {
+	return Dialer{}.Dial(address, maxMtu)
 }
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
@@ -84,7 +93,7 @@ func (dialer Dialer) Ping(address string) (response []byte, err error) {
 // Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
 // connection will timeout and an error will be returned.
 // Dial will fill out any values left as their empty values with the default values of those fields.
-func (dialer Dialer) Dial(address string) (*Conn, error) {
+func (dialer Dialer) Dial(address string, maxMtu int16) (*Conn, error) {
 	udpConn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
@@ -101,7 +110,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 	state := &connState{
 		conn:               udpConn,
 		remoteAddr:         udpConn.RemoteAddr(),
-		discoveringMTUSize: 1492,
+		discoveringMTUSize: maxMtu,
 		id:                 id,
 	}
 	if err := state.discoverMTUSize(); err != nil {

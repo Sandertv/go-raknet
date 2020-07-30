@@ -1,12 +1,25 @@
 package main
 
 import (
-	"github.com/sandertv/go-raknet"
 	"log"
+
+	"github.com/sandertv/go-raknet"
 )
 
 func main() {
-	listener, err := raknet.Listen("0.0.0.0:19132")
+	// First we do a quick connection to get server's MTU and reuse with clients.
+	// Since this is an UDP raw proxy we don't reassemble packets. MTUs are
+	// negotiated between server and clients at the raknet connection handshake,
+	// where this handshake is actually not forwarded, but re-established by the
+	// proxy, therefore we need to match MTU between server and clients ourselves.
+	server, err := raknet.Dial("mco.mineplex.com:19132")
+	if err != nil {
+		panic(err)
+	}
+	mtu := server.MtuSize()
+	server.Close()
+
+	listener, err := raknet.ListenWithMaxMtu("0.0.0.0:19132", mtu)
 	defer func() {
 		_ = listener.Close()
 	}()
@@ -26,8 +39,8 @@ func main() {
 			panic(err)
 		}
 		// We spin up a new connection with the server each time a client connects to the proxy.
-		//noinspection SpellCheckingInspection
-		server, err := raknet.Dial("mco.mineplex.com:19132")
+		// noinspection SpellCheckingInspection. Limit mtu to match client side mtu.
+		server, err := raknet.DialWithMaxMtu("mco.mineplex.com:19132", conn.MtuSize())
 		if err != nil {
 			panic(err)
 		}
