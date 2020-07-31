@@ -31,6 +31,8 @@ const (
 	tickInterval = time.Second / 20
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = time.Second * 4
+
+	maxMTUSize = 1400
 )
 
 var (
@@ -127,7 +129,7 @@ type Conn struct {
 // newConn constructs a new connection specifically dedicated to the address passed.
 func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client bool) *Conn {
 	if mtuSize < 500 || mtuSize > 1500 {
-		mtuSize = 1492
+		mtuSize = maxMTUSize
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())

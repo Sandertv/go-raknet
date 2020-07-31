@@ -287,14 +287,14 @@ func (state *connState) discoverMTUSize() (e error) {
 			if err := response.Read(buffer); err != nil {
 				return fmt.Errorf("error reading open connection reply 1: %v", err)
 			}
-			if response.MTUSize < 400 || response.MTUSize > 1500 {
+			if response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
 				// This is an awful hack we cooked up to deal with OVH 'DDoS' protection. For some reason they
 				// send a broken MTU size first. Sending a Request2 followed by a Request1 deals with this.
-				_ = state.sendOpenConnectionRequest2(response.MTUSize)
+				_ = state.sendOpenConnectionRequest2(response.ServerPreferredMTUSize)
 				staticMTU = state.discoveringMTUSize + 40
 				continue
 			}
-			state.mtuSize = response.MTUSize
+			state.mtuSize = response.ServerPreferredMTUSize
 			return
 		case message.IDIncompatibleProtocolVersion:
 			response := &message.IncompatibleProtocolVersion{}
@@ -310,7 +310,7 @@ func (state *connState) discoverMTUSize() (e error) {
 // error is returned.
 func (state *connState) sendOpenConnectionRequest2(mtu int16) error {
 	b := bytes.NewBuffer(nil)
-	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), MTUSize: mtu, ClientGUID: state.id}).Write(b)
+	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), ClientPreferredMTUSize: mtu, ClientGUID: state.id}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
 	return err
 }
@@ -319,7 +319,7 @@ func (state *connState) sendOpenConnectionRequest2(mtu int16) error {
 // error is returned.
 func (state *connState) sendOpenConnectionRequest1(mtu int16) error {
 	b := bytes.NewBuffer(nil)
-	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MTUSize: mtu}).Write(b)
+	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MaximumSizeNotDropped: mtu}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
 	return err
 }

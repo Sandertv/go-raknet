@@ -240,12 +240,17 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 	}
 	b.Reset()
 
-	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: packet.MTUSize}).Write(b)
+	mtuSize := packet.ClientPreferredMTUSize
+	if mtuSize > maxMTUSize {
+		mtuSize = maxMTUSize
+	}
+
+	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: mtuSize}).Write(b)
 	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
 
-	conn := newConn(listener.conn, addr, packet.MTUSize, packet.ClientGUID, false)
+	conn := newConn(listener.conn, addr, packet.ClientPreferredMTUSize, packet.ClientGUID, false)
 	listener.connections.Store(addr.String(), conn)
 
 	go func() {
@@ -276,7 +281,10 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 		return fmt.Errorf("error reading open connection request 1: %v", err)
 	}
 	b.Reset()
-	mtuSize := packet.MTUSize
+	mtuSize := packet.MaximumSizeNotDropped
+	if mtuSize > maxMTUSize {
+		mtuSize = maxMTUSize
+	}
 
 	if packet.Protocol != currentProtocol {
 		(&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).Write(b)
@@ -284,7 +292,7 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, currentProtocol)
 	}
 
-	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, MTUSize: mtuSize}).Write(b)
+	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, ServerPreferredMTUSize: mtuSize}).Write(b)
 	_, err := listener.conn.WriteTo(b.Bytes(), addr)
 	return err
 }
