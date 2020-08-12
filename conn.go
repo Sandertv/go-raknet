@@ -32,7 +32,8 @@ const (
 	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
 	pingInterval = time.Second * 4
 
-	maxMTUSize = 1400
+	maxMTUSize    = 1400
+	maxWindowSize = 512
 )
 
 var (
@@ -466,6 +467,9 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	} else {
 		conn.missingDatagramTimes = 0
 	}
+	if conn.datagramRecvQueue.WindowSize() > maxWindowSize && !conn.client {
+		return fmt.Errorf("datagram receive queue window size is too big")
+	}
 
 	for b.Len() > 0 {
 		if err := conn.readPacket.read(b); err != nil {
@@ -501,6 +505,9 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// Don't return these errors. We'll have a packet that was sent either multiple times, arrived
 		// multiple times or something else. These aren't critical errors.
 		return nil
+	}
+	if conn.packetQueue.WindowSize() > maxWindowSize && !conn.client {
+		return fmt.Errorf("packet queue window size is too big")
 	}
 	for _, packetContent := range conn.packetQueue.takeOut() {
 		if err := conn.handlePacket(packetContent.([]byte)); err != nil {
@@ -635,6 +642,10 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // continue handling the full packet as it otherwise would.
 // An error is returned if the packet was not valid.
 func (conn *Conn) handleSplitPacket(p *packet) error {
+	const maxSplitCount = 256
+	if p.splitCount > maxSplitCount && !conn.client {
+		return fmt.Errorf("split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
+	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
 		m = make([][]byte, p.splitCount)

@@ -113,6 +113,11 @@ func (queue *orderedQueue) Len() int {
 	return len(queue.queue)
 }
 
+// WindowSize returns the size of the window held by the ordered queue.
+func (queue *orderedQueue) WindowSize() uint24 {
+	return queue.highestIndex - queue.lowestIndex
+}
+
 // Timestamp returns the a timestamp of the time that a packet with the sequence number passed arrived at in
 // the recovery queue. It panics if the sequence number doesn't exist.
 func (queue *orderedQueue) Timestamp(sequenceNumber uint24) time.Time {
