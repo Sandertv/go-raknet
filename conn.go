@@ -98,9 +98,9 @@ type Conn struct {
 	// count, and packets are positioned in that slice indexed by the split index.
 	splits map[uint16][][]byte
 
-	// datagramRecvQueue is an ordered queue used to track which datagrams were received and which datagrams
+	// datagramQueue is an ordered queue used to track which datagrams were received and which datagrams
 	// were missing, so that we can send NACKs to request missing datagrams.
-	datagramRecvQueue *orderedQueue
+	datagramQueue *datagramQueue
 	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
 	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
 	datagramsReceived atomic.Value
@@ -108,7 +108,7 @@ type Conn struct {
 	missingDatagramTimes int
 
 	// packetQueue is an ordered queue containing packets indexed by their order index.
-	packetQueue *orderedQueue
+	packetQueue *packetQueue
 	// packetChan is a channel containing content of packets that were fully processed. Calling Conn.Read()
 	// consumes a value from this channel.
 	packetChan chan *bytes.Buffer
@@ -117,7 +117,7 @@ type Conn struct {
 	lastPacketTime atomic.Value
 
 	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
-	recoveryQueue *orderedQueue
+	recoveryQueue *recoveryQueue
 
 	closeCtx context.Context
 	close    context.CancelFunc
@@ -144,9 +144,9 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		completingSequence: sequenceCtx,
 		finishSequence:     sequenceComplete,
 		splits:             make(map[uint16][][]byte),
-		datagramRecvQueue:  newOrderedQueue(),
-		packetQueue:        newOrderedQueue(),
-		recoveryQueue:      newOrderedQueue(),
+		datagramQueue:      newDatagramQueue(),
+		packetQueue:        newPacketQueue(),
+		recoveryQueue:      newRecoveryQueue(),
 		close:              cancel,
 		closeCtx:           ctx,
 		packetChan:         make(chan *bytes.Buffer, 128),
@@ -291,7 +291,7 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		conn.writeBuffer.Reset()
 
 		// Finally we add the packet to the recovery queue.
-		_ = conn.recoveryQueue.put(sequenceNumber, packet)
+		conn.recoveryQueue.put(sequenceNumber, packet)
 		n += len(content)
 	}
 	return
@@ -448,26 +448,27 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
-	if err := conn.datagramRecvQueue.put(sequenceNumber, true); err != nil {
+	// Add this sequence number to the received datagrams so we ACK it.
+	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
+
+	lowestBefore := conn.datagramQueue.lowest
+	if !conn.datagramQueue.put(sequenceNumber) {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}
-	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
-	if len(conn.datagramRecvQueue.takeOut()) == 0 {
+
+	if conn.datagramQueue.lowest == lowestBefore {
 		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
 		// increment the counter, and if it exceeds the threshold we send a NACK to request again.
 		conn.missingDatagramTimes++
 		if conn.missingDatagramTimes >= resendRequestThreshold {
-			if err := conn.sendNACK(conn.datagramRecvQueue.missing()...); err != nil {
+			if err := conn.sendNACK(conn.datagramQueue.missing()); err != nil {
 				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
-			// Take all 'datagrams' that were put in by the datagramRecvQueue.missing() call out of the queue,
-			// as datagrams that we will receive again will have a different sequence number.
-			conn.datagramRecvQueue.takeOut()
 		}
 	} else {
 		conn.missingDatagramTimes = 0
 	}
-	if conn.datagramRecvQueue.WindowSize() > maxWindowSize && !conn.client {
+	if conn.datagramQueue.WindowSize() > maxWindowSize && !conn.client {
 		return fmt.Errorf("datagram receive queue window size is too big")
 	}
 
@@ -498,19 +499,15 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// If it isn't a reliable ordered packet, handle it immediately.
 		return conn.handlePacket(packet.content)
 	}
-	if err := conn.packetQueue.put(packet.orderIndex, packet.content); err != nil {
-		if packet.orderIndex == 0 && !conn.packetQueue.zeroRecv {
-			return conn.handlePacket(packet.content)
-		}
-		// Don't return these errors. We'll have a packet that was sent either multiple times, arrived
-		// multiple times or something else. These aren't critical errors.
+	if !conn.packetQueue.put(packet.orderIndex, packet.content) {
+		// An ordered packet arrived twice.
 		return nil
 	}
 	if conn.packetQueue.WindowSize() > maxWindowSize && !conn.client {
 		return fmt.Errorf("packet queue window size is too big")
 	}
-	for _, packetContent := range conn.packetQueue.takeOut() {
-		if err := conn.handlePacket(packetContent.([]byte)); err != nil {
+	for _, content := range conn.packetQueue.fetch() {
+		if err := conn.handlePacket(content); err != nil {
 			return fmt.Errorf("error handling packet: %v", err)
 		}
 	}
@@ -643,8 +640,8 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // An error is returned if the packet was not valid.
 func (conn *Conn) handleSplitPacket(p *packet) error {
 	const maxSplitCount = 256
-	if p.splitCount > maxSplitCount && !conn.client {
-		return fmt.Errorf("split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
+	if p.splitCount > maxSplitCount && !conn.client || len(conn.splits) > 16 {
+		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
 	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
@@ -695,7 +692,7 @@ func (conn *Conn) sendACK(packets ...uint24) error {
 
 // sendNACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
-func (conn *Conn) sendNACK(packets ...uint24) error {
+func (conn *Conn) sendNACK(packets []uint24) error {
 	ack := &acknowledgement{packets: packets}
 	buffer := bytes.NewBuffer([]byte{bitFlagNACK | bitFlagValid})
 	if err := ack.write(buffer); err != nil {
@@ -722,7 +719,7 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 		p, ok := conn.recoveryQueue.take(sequenceNumber)
 		if ok {
 			// Clear the packet and return it to the pool so that it may be re-used.
-			p.(*packet).content = nil
+			p.content = nil
 			packetPool.Put(p)
 		}
 	}
@@ -745,13 +742,12 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 // resend sends all datagrams currently in the recovery queue with the sequence numbers passed.
 func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
-		val, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
+		packet, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
 		if !ok {
 			// We could not resend this datagram. Maybe it was already resent before at the request of the
 			// client. This is generally expected so we just continue.
 			continue
 		}
-		packet := val.(*packet)
 
 		// We first write a new datagram header using a new send sequence number that we find.
 		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
@@ -770,7 +766,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		}
 		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
-		_ = conn.recoveryQueue.put(newSeqNum, packet)
+		conn.recoveryQueue.put(newSeqNum, packet)
 		conn.writeBuffer.Reset()
 	}
 	return nil
