@@ -69,8 +69,10 @@ type Conn struct {
 	addr    net.Addr
 	timeout time.Duration
 
-	writeLock   sync.Mutex
-	writeBuffer *bytes.Buffer
+	writeLock sync.Mutex
+	writeBuf  *bytes.Buffer
+
+	ackBuf, nackBuf *bytes.Buffer
 
 	readPacket *packet
 
@@ -150,7 +152,9 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		close:              cancel,
 		closeCtx:           ctx,
 		packetChan:         make(chan *bytes.Buffer, 128),
-		writeBuffer:        bytes.NewBuffer(nil),
+		writeBuf:           bytes.NewBuffer(nil),
+		ackBuf:             bytes.NewBuffer(make([]byte, 0, 256)),
+		nackBuf:            bytes.NewBuffer(make([]byte, 0, 256)),
 		readPacket:         &packet{},
 	}
 	if client {
@@ -254,10 +258,10 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		messageIndex := conn.sendMessageIndex
 		conn.sendMessageIndex++
 
-		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
+		if err := conn.writeBuf.WriteByte(bitFlagValid); err != nil {
 			return 0, fmt.Errorf("error writing datagram header: %v", err)
 		}
-		writeUint24(conn.writeBuffer, sequenceNumber)
+		writeUint24(conn.writeBuf, sequenceNumber)
 		packet := packetPool.Get().(*packet)
 		if cap(packet.content) < len(content) {
 			packet.content = make([]byte, len(content))
@@ -280,15 +284,15 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		} else {
 			packet.split = false
 		}
-		if err := packet.write(conn.writeBuffer); err != nil {
+		if err := packet.write(conn.writeBuf); err != nil {
 			return 0, fmt.Errorf("error writing packet to buffer: %v", err)
 		}
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(conn.writeBuf.Bytes(), conn.addr); err != nil {
 			return 0, fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
-		conn.writeBuffer.Reset()
+		conn.writeBuf.Reset()
 
 		// Finally we add the packet to the recovery queue.
 		conn.recoveryQueue.put(sequenceNumber, packet)
@@ -679,12 +683,14 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 // sendACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
 func (conn *Conn) sendACK(packets ...uint24) error {
+	defer conn.ackBuf.Reset()
+
 	ack := &acknowledgement{packets: packets}
-	buffer := bytes.NewBuffer([]byte{bitFlagACK | bitFlagValid})
-	if err := ack.write(buffer); err != nil {
+	conn.ackBuf.WriteByte(bitFlagACK | bitFlagValid)
+	if err := ack.write(conn.ackBuf); err != nil {
 		return fmt.Errorf("error encoding ACK packet: %v", err)
 	}
-	if _, err := conn.conn.WriteTo(buffer.Bytes(), conn.addr); err != nil {
+	if _, err := conn.conn.WriteTo(conn.ackBuf.Bytes(), conn.addr); err != nil {
 		return fmt.Errorf("error sending ACK packet: %v", err)
 	}
 	return nil
@@ -693,12 +699,14 @@ func (conn *Conn) sendACK(packets ...uint24) error {
 // sendNACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
 func (conn *Conn) sendNACK(packets []uint24) error {
+	defer conn.nackBuf.Reset()
+
 	ack := &acknowledgement{packets: packets}
-	buffer := bytes.NewBuffer([]byte{bitFlagNACK | bitFlagValid})
-	if err := ack.write(buffer); err != nil {
+	conn.nackBuf.WriteByte(bitFlagNACK | bitFlagValid)
+	if err := ack.write(conn.nackBuf); err != nil {
 		return fmt.Errorf("error encoding NACK packet: %v", err)
 	}
-	if _, err := conn.conn.WriteTo(buffer.Bytes(), conn.addr); err != nil {
+	if _, err := conn.conn.WriteTo(conn.nackBuf.Bytes(), conn.addr); err != nil {
 		return fmt.Errorf("error sending NACK packet: %v", err)
 	}
 	return nil
@@ -750,24 +758,24 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		}
 
 		// We first write a new datagram header using a new send sequence number that we find.
-		if err := conn.writeBuffer.WriteByte(bitFlagValid); err != nil {
+		if err := conn.writeBuf.WriteByte(bitFlagValid); err != nil {
 			return fmt.Errorf("error writing recovered datagram header: %v", err)
 		}
 		newSeqNum := conn.sendSequenceNumber
 		conn.sendSequenceNumber++
-		writeUint24(conn.writeBuffer, newSeqNum)
-		if err := packet.write(conn.writeBuffer); err != nil {
+		writeUint24(conn.writeBuf, newSeqNum)
+		if err := packet.write(conn.writeBuf); err != nil {
 			return fmt.Errorf("error writing recovered packet to buffer: %v", err)
 		}
 
 		// We then send the packet to the connection.
-		if _, err := conn.conn.WriteTo(conn.writeBuffer.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(conn.writeBuf.Bytes(), conn.addr); err != nil {
 			return fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
 		}
 		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
 		conn.recoveryQueue.put(newSeqNum, packet)
-		conn.writeBuffer.Reset()
+		conn.writeBuf.Reset()
 	}
 	return nil
 }
