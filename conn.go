@@ -122,6 +122,7 @@ type Conn struct {
 	recoveryQueue *recoveryQueue
 
 	closeCtx context.Context
+	once     sync.Once
 	close    context.CancelFunc
 
 	// readDeadline is a channel that receives a time.Time after a specific time. It is used to listen for
@@ -321,8 +322,10 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
 func (conn *Conn) Close() error {
-	_, _ = conn.Write([]byte{message.IDDisconnectNotification})
-	conn.close()
+	conn.once.Do(func() {
+		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
+		conn.close()
+	})
 	return nil
 }
 
