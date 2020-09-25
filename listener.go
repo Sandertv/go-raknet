@@ -93,18 +93,6 @@ func (listener *Listener) Addr() net.Addr {
 // packets is able to be freed.
 func (listener *Listener) Close() error {
 	listener.close()
-
-	var err error
-	listener.connections.Range(func(key, value interface{}) bool {
-		conn := value.(*Conn)
-		if closeErr := conn.Close(); err != nil {
-			err = fmt.Errorf("error closing conn %v: %v", conn.addr, closeErr)
-		}
-		return true
-	})
-	if err != nil {
-		return err
-	}
 	if err := listener.conn.Close(); err != nil {
 		return fmt.Errorf("error closing UDP listener: %v", err)
 	}
