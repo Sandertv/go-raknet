@@ -195,14 +195,19 @@ func (state *connState) openConnectionRequest() (e error) {
 	defer func() {
 		stop <- true
 	}()
+	// Use an intermediate channel to start the ticker immediately.
+	c := make(chan struct{}, 1)
+	c <- struct{}{}
 	go func() {
 		for {
 			select {
-			case <-ticker.C:
+			case <-c:
 				if err := state.sendOpenConnectionRequest2(state.mtuSize); err != nil {
 					e = err
 					return
 				}
+			case <-ticker.C:
+				c <- struct{}{}
 			case <-stop:
 				return
 			}
@@ -246,10 +251,13 @@ func (state *connState) discoverMTUSize() (e error) {
 	defer func() {
 		cancel()
 	}()
+	// Use an intermediate channel to start the ticker immediately.
+	c := make(chan struct{}, 1)
+	c <- struct{}{}
 	go func() {
 		for {
 			select {
-			case <-ticker.C:
+			case <-c:
 				mtu := state.discoveringMTUSize
 				if staticMTU != 0 {
 					mtu = staticMTU
@@ -263,6 +271,8 @@ func (state *connState) discoverMTUSize() (e error) {
 					// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
 					state.discoveringMTUSize -= 40
 				}
+			case <-ticker.C:
+				c <- struct{}{}
 			case <-ctx.Done():
 				return
 			}
