@@ -17,12 +17,8 @@ const (
 	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
 	currentProtocol byte = 10
 
-	// serverTimeout is the timeout after which a conn times out, if it hasn't received a packet for that
-	// duration.
-	serverTimeout = time.Second * 7
-	// clientTimeout is the timeout after which a Conn from Dial() times out, if it hasn't received a packet
-	// for that duration.
-	clientTimeout = serverTimeout * 2
+	// timeout is the timeout after which a conn times out, if it hasn't received a packet for that duration.
+	timeout = time.Second * 10
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
@@ -64,10 +60,9 @@ func ErrReadTimeout(err error) bool {
 // but rather a connection emulated using RakNet.
 // Methods may be called on Conn from multiple goroutines simultaneously.
 type Conn struct {
-	conn    net.PacketConn
-	client  bool
-	addr    net.Addr
-	timeout time.Duration
+	conn   net.PacketConn
+	client bool
+	addr   net.Addr
 
 	writeLock sync.Mutex
 	writeBuf  *bytes.Buffer
@@ -139,7 +134,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 	sequenceCtx, sequenceComplete := context.WithCancel(context.Background())
 	c := &Conn{
 		client:             client,
-		timeout:            serverTimeout,
 		addr:               addr,
 		conn:               conn,
 		mtuSize:            mtuSize,
@@ -157,9 +151,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		ackBuf:             bytes.NewBuffer(make([]byte, 0, 256)),
 		nackBuf:            bytes.NewBuffer(make([]byte, 0, 256)),
 		readPacket:         &packet{},
-	}
-	if client {
-		c.timeout = clientTimeout
 	}
 	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
@@ -183,7 +174,7 @@ func (conn *Conn) startTicking() {
 		case t := <-ticker.C:
 			// We first check if the other end has actually timed out. If so, we close the conn, as it is
 			// likely the client was disconnected.
-			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > conn.timeout {
+			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > timeout {
 				// If the timeout was long enough, we close the connection.
 				_ = conn.Close()
 				return
