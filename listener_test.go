@@ -1,7 +1,9 @@
 package raknet
 
 import (
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestListen(t *testing.T) {
@@ -10,15 +12,24 @@ func TestListen(t *testing.T) {
 		panic(err)
 	}
 	go func() {
-		if _, err := Dial("127.0.0.1:19132"); err != nil {
-			t.Fatalf("error connecting to listener: %v", err)
-		}
+		_, _ = Dial("127.0.0.1:19132")
 	}()
-	for {
-		if _, err := l.Accept(); err != nil {
-			t.Fatalf("error accepting connection: %v", err)
-			return
+	c := make(chan error)
+	go accept(l, c)
+
+	select {
+	case err := <-c:
+		if err != nil {
+			t.Error(err)
 		}
-		return
+	case <-time.After(time.Second * 3):
+		t.Errorf("accepting connection took longer than 3 seconds")
 	}
+}
+
+func accept(l *Listener, c chan error) {
+	if _, err := l.Accept(); err != nil {
+		c <- fmt.Errorf("error accepting connection: %v", err)
+	}
+	c <- nil
 }

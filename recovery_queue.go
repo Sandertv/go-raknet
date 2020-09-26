@@ -33,7 +33,7 @@ func (queue *recoveryQueue) take(index uint24) (val *packet, ok bool) {
 	val, ok = queue.queue[index]
 	if ok {
 		delete(queue.queue, index)
-		queue.delays[queue.ptr] = time.Now().Sub(queue.timestamps[index])
+		queue.delays[queue.ptr] = time.Since(queue.timestamps[index])
 		queue.ptr++
 		if queue.ptr == delayRecordCount {
 			queue.ptr = 0

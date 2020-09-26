@@ -209,7 +209,7 @@ func (conn *Conn) checkResend() {
 	for seqNum := range conn.recoveryQueue.queue {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
-		if time.Now().Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
+		if time.Since(conn.recoveryQueue.Timestamp(seqNum)) > delay {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
@@ -342,7 +342,7 @@ func (conn *Conn) SetReadDeadline(t time.Time) error {
 	if t.Before(time.Now()) {
 		return fmt.Errorf("read deadline cannot be before now")
 	}
-	conn.readDeadline = time.After(t.Sub(time.Now()))
+	conn.readDeadline = time.After(time.Until(t))
 	return nil
 }
 
