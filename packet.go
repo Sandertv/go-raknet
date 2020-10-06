@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	// bitFlagValid is set for every valid datagram. It is used to identify packets that are datagrams.
-	bitFlagValid = 0x80
+	// bitFlagDatagram is set for every valid datagram. It is used to identify packets that are datagrams.
+	bitFlagDatagram = 0x80
 	// bitFlagACK is set for every ACK packet.
 	bitFlagACK = 0x40
 	// bitFlagNACK is set for every NACK packet.
@@ -279,7 +279,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 
 // read reads an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) read(b *bytes.Buffer) error {
-	const maxAcknowledgementPackets = 4096
+	const maxAcknowledgementPackets = 8192
 	var recordCount int16
 	if err := binary.Read(b, binary.BigEndian, &recordCount); err != nil {
 		return err

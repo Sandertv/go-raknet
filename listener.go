@@ -203,7 +203,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		default:
 			// In some cases, the client will keep trying to send datagrams while it has already timed out. In
 			// this case, we should not print an error.
-			if packetID&bitFlagValid == 0 {
+			if packetID&bitFlagDatagram == 0 {
 				return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
 			}
 		}

@@ -29,7 +29,7 @@ const (
 	pingInterval = time.Second * 4
 
 	maxMTUSize    = 1400
-	maxWindowSize = 512
+	maxWindowSize = 1024
 )
 
 var (
@@ -146,7 +146,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		recoveryQueue:      newRecoveryQueue(),
 		close:              cancel,
 		closeCtx:           ctx,
-		packetChan:         make(chan *bytes.Buffer, 128),
+		packetChan:         make(chan *bytes.Buffer, 512),
 		writeBuf:           bytes.NewBuffer(nil),
 		ackBuf:             bytes.NewBuffer(make([]byte, 0, 256)),
 		nackBuf:            bytes.NewBuffer(make([]byte, 0, 256)),
@@ -250,7 +250,7 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		messageIndex := conn.sendMessageIndex
 		conn.sendMessageIndex++
 
-		if err := conn.writeBuf.WriteByte(bitFlagValid); err != nil {
+		if err := conn.writeBuf.WriteByte(bitFlagDatagram); err != nil {
 			return 0, fmt.Errorf("error writing datagram header: %v", err)
 		}
 		writeUint24(conn.writeBuf, sequenceNumber)
@@ -425,8 +425,8 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
 	}
-	if headerFlags&bitFlagValid == 0 {
-		// Close the connection if a non-datagram packet was received. This is probably an offline message.
+	if headerFlags&bitFlagDatagram == 0 {
+		// Ignore packets that do not have the datagram bitflag.
 		return nil
 	}
 	switch {
@@ -553,22 +553,12 @@ func (conn *Conn) handlePacket(b []byte) error {
 			return fmt.Errorf("error unreading custom packet ID: %v", err)
 		}
 		// Insert the packet contents the packet queue could release in the channel so that Conn.Read() can
-		// get a hold of them.
-		if conn.client {
-			select {
-			case conn.packetChan <- buffer:
-			case <-conn.closeCtx.Done():
-				return nil
-			}
-			return nil
-		}
+		// get a hold of them, but always first try to escape if the connection was closed.
 		select {
-		case conn.packetChan <- buffer:
 		case <-conn.closeCtx.Done():
-			return nil
-		default:
-			return fmt.Errorf("too many packets left unhandled")
+		case conn.packetChan <- buffer:
 		}
+		return nil
 	}
 	return nil
 }
@@ -680,7 +670,7 @@ func (conn *Conn) sendACK(packets ...uint24) error {
 	defer conn.ackBuf.Reset()
 
 	ack := &acknowledgement{packets: packets}
-	conn.ackBuf.WriteByte(bitFlagACK | bitFlagValid)
+	conn.ackBuf.WriteByte(bitFlagACK | bitFlagDatagram)
 	if err := ack.write(conn.ackBuf); err != nil {
 		return fmt.Errorf("error encoding ACK packet: %v", err)
 	}
@@ -696,7 +686,7 @@ func (conn *Conn) sendNACK(packets []uint24) error {
 	defer conn.nackBuf.Reset()
 
 	ack := &acknowledgement{packets: packets}
-	conn.nackBuf.WriteByte(bitFlagNACK | bitFlagValid)
+	conn.nackBuf.WriteByte(bitFlagNACK | bitFlagDatagram)
 	if err := ack.write(conn.nackBuf); err != nil {
 		return fmt.Errorf("error encoding NACK packet: %v", err)
 	}
@@ -752,7 +742,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		}
 
 		// We first write a new datagram header using a new send sequence number that we find.
-		if err := conn.writeBuf.WriteByte(bitFlagValid); err != nil {
+		if err := conn.writeBuf.WriteByte(bitFlagDatagram); err != nil {
 			return fmt.Errorf("error writing recovered datagram header: %v", err)
 		}
 		newSeqNum := conn.sendSequenceNumber
