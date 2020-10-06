@@ -64,3 +64,6 @@ folder.
 
 ### Documentation
 Documentation may be found [here](https://godoc.org/github.com/Sandertv/go-raknet).
+
+## Contact
+[![Chat on Discord](https://img.shields.io/badge/Chat-On%20Discord-738BD7.svg?style=for-the-badge)](https://discord.gg/evzQR4R)
