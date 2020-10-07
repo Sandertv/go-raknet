@@ -25,8 +25,8 @@ const (
 	// tickInterval is the interval at which the connection sends an ACK containing the packets which were
 	// received or a NACK for missing packets.
 	tickInterval = time.Second / 20
-	// pingInterval is the interval in seconds at which a ping is sent to the other end of the connection.
-	pingInterval = time.Second * 4
+	// pingInterval is the interval in ticks at which a ping is sent to the other end of the connection.
+	pingInterval = 80
 
 	maxMTUSize    = 1400
 	maxWindowSize = 1024
@@ -164,16 +164,19 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 // startTicking makes the connection start ticking, sending ACKs and pings to the other end where necessary
 // and checking if the connection should be timed out.
 func (conn *Conn) startTicking() {
-	ticker, pingTicker := time.NewTicker(tickInterval), time.NewTicker(pingInterval)
+	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
-	defer pingTicker.Stop()
+
+	var i int64
 	for {
 		select {
-		case <-pingTicker.C:
-			// We send a connected ping to calculate the latency and let the other side know we haven't
-			// timed out.
-			conn.sendPing()
 		case t := <-ticker.C:
+			i++
+			if i%pingInterval == 0 {
+				// We send a connected ping to calculate the latency and let the other side know we haven't
+				// timed out.
+				conn.sendPing()
+			}
 			// We first check if the other end has actually timed out. If so, we close the conn, as it is
 			// likely the client was disconnected.
 			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > timeout {
