@@ -475,6 +475,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 			if err := conn.sendNACK(conn.datagramQueue.missing()); err != nil {
 				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
+			conn.missingDatagramTimes = 0
 		}
 	} else {
 		conn.missingDatagramTimes = 0
