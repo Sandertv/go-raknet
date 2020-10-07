@@ -123,6 +123,8 @@ type Conn struct {
 	// readDeadline is a channel that receives a time.Time after a specific time. It is used to listen for
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
+
+	resends int
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -205,7 +207,7 @@ func (conn *Conn) checkResend() {
 	atomic.StoreUint32(&conn.latency, uint32(latency/2))
 
 	// Allow the average delay with a deviation of 200%.
-	delay := latency * 3
+	delay := latency*3 + ((latency / 4) * time.Duration(conn.resends))
 	for seqNum := range conn.recoveryQueue.queue {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
@@ -213,8 +215,19 @@ func (conn *Conn) checkResend() {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
+	l := len(resendSeqNums)
 	_ = conn.resend(resendSeqNums) // NOP if len(resendSeqNums) == 0.
 	conn.writeLock.Unlock()
+
+	if l != 0 {
+		conn.resends++
+
+		if conn.resends > 30 {
+			_ = conn.Close()
+		}
+	} else {
+		conn.resends--
+	}
 }
 
 // Write writes a buffer b over the RakNet connection. The amount of bytes written n is always equal to the
@@ -668,32 +681,40 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 // an error is returned.
 func (conn *Conn) sendACK(packets ...uint24) error {
 	defer conn.ackBuf.Reset()
-
-	ack := &acknowledgement{packets: packets}
-	conn.ackBuf.WriteByte(bitFlagACK | bitFlagDatagram)
-	if err := ack.write(conn.ackBuf); err != nil {
-		return fmt.Errorf("error encoding ACK packet: %v", err)
-	}
-	if _, err := conn.conn.WriteTo(conn.ackBuf.Bytes(), conn.addr); err != nil {
-		return fmt.Errorf("error sending ACK packet: %v", err)
-	}
-	return nil
+	return conn.sendAcknowledgement(packets, bitFlagACK, conn.ackBuf)
 }
 
 // sendNACK sends an acknowledgement packet containing the packet sequence numbers passed. If not successful,
 // an error is returned.
 func (conn *Conn) sendNACK(packets []uint24) error {
 	defer conn.nackBuf.Reset()
+	return conn.sendAcknowledgement(packets, bitFlagNACK, conn.nackBuf)
+}
 
-	ack := &acknowledgement{packets: packets}
-	conn.nackBuf.WriteByte(bitFlagNACK | bitFlagDatagram)
-	if err := ack.write(conn.nackBuf); err != nil {
-		return fmt.Errorf("error encoding NACK packet: %v", err)
+// sendAcknowledgement sends an acknowledgement packet with the packets passed, potentially sending multiple
+// if too many packets are passed. The bitflag is added to the header byte.
+func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes.Buffer) error {
+	ack := &acknowledgement{}
+
+	for {
+		ack.packets = packets
+		if len(ack.packets) > 4096 {
+			ack.packets = packets[:4096]
+			packets = packets[4096:]
+		} else {
+			packets = packets[:0]
+		}
+		buf.WriteByte(bitflag | bitFlagDatagram)
+		if err := ack.write(buf); err != nil {
+			return fmt.Errorf("error encoding ACK packet: %v", err)
+		}
+		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.addr); err != nil {
+			return fmt.Errorf("error sending ACK packet: %v", err)
+		}
+		if len(packets) == 0 {
+			return nil
+		}
 	}
-	if _, err := conn.conn.WriteTo(conn.nackBuf.Bytes(), conn.addr); err != nil {
-		return fmt.Errorf("error sending NACK packet: %v", err)
-	}
-	return nil
 }
 
 // handleACK handles an acknowledgement packet from the other end of the connection. These mean that a
