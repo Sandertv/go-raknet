@@ -225,7 +225,7 @@ func (conn *Conn) checkResend() {
 		if conn.resends > 30 {
 			_ = conn.Close()
 		}
-	} else {
+	} else if conn.resends > 0 {
 		conn.resends--
 	}
 }
