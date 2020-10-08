@@ -148,8 +148,8 @@ func (packet *packet) read(b *bytes.Buffer) error {
 	}
 
 	packet.content = make([]byte, packetLength)
-	if _, err := b.Read(packet.content); err != nil {
-		return fmt.Errorf("error reading packet content: %v", err)
+	if n, err := b.Read(packet.content); err != nil || n != int(packetLength) {
+		return fmt.Errorf("not enough data in packet: %v bytes read but need %v", n, packetLength)
 	}
 	return nil
 }
