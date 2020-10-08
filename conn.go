@@ -327,6 +327,20 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	}
 }
 
+// ReadPacket attempts to read the next packet as a byte slice.
+// ReadPacket blocks until a packet is received over the connection, or until the session is closed or the
+// read times out, in which case an error is returned.
+func (conn *Conn) ReadPacket() (b []byte, err error) {
+	select {
+	case packet := <-conn.packetChan:
+		return packet.Bytes(), err
+	case <-conn.closeCtx.Done():
+		return nil, errors.New(errConnectionClosed)
+	case <-conn.readDeadline:
+		return nil, errors.New(errReadTimeout)
+	}
+}
+
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
 func (conn *Conn) Close() error {
 	conn.once.Do(func() {
