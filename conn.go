@@ -184,7 +184,9 @@ func (conn *Conn) startTicking() {
 				_ = conn.Close()
 				return
 			}
-			conn.checkResend()
+			if i%2 == 0 {
+				conn.checkResend()
+			}
 		case <-conn.closeCtx.Done():
 			return
 		}
