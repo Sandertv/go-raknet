@@ -30,14 +30,15 @@ func (queue *packetQueue) put(index uint24, packet []byte) bool {
 // fetch attempts to take out as many values from the ordered queue as possible. Upon encountering an index
 // that has no value yet, the function returns all values that it did find and takes them out.
 func (queue *packetQueue) fetch() (packets [][]byte) {
-	var index uint24
-	for index = queue.lowest; index < queue.highest; index++ {
+	index := queue.lowest
+	for index < queue.highest {
 		packet, ok := queue.queue[index]
 		if !ok {
 			break
 		}
 		delete(queue.queue, index)
 		packets = append(packets, packet)
+		index++
 	}
 	queue.lowest = index
 	return
