@@ -212,7 +212,7 @@ func (conn *Conn) checkResend() {
 	atomic.StoreUint32(&conn.latency, uint32(latency/2))
 
 	// Allow the average delay with a deviation of 200%.
-	delay := latency*3 + ((latency / 4) * time.Duration(conn.resends))
+	delay := latency*3 + ((latency / 2) * time.Duration(conn.resends))
 	for seqNum := range conn.recoveryQueue.queue {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
