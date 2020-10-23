@@ -24,9 +24,9 @@ const (
 	resendRequestThreshold = 10
 	// tickInterval is the interval at which the connection sends an ACK containing the packets which were
 	// received or a NACK for missing packets.
-	tickInterval = time.Second / 20
+	tickInterval = time.Second / 10
 	// pingInterval is the interval in ticks at which a ping is sent to the other end of the connection.
-	pingInterval = 80
+	pingInterval = 40
 
 	maxMTUSize    = 1400
 	maxWindowSize = 1024
@@ -109,9 +109,6 @@ type Conn struct {
 	// packetChan is a channel containing content of packets that were fully processed. Calling Conn.Read()
 	// consumes a value from this channel.
 	packetChan chan *bytes.Buffer
-	// lastPacketTime is the last time a packet was received. It is used to measure the time until the
-	// connection times out.
-	lastPacketTime atomic.Value
 
 	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
 	recoveryQueue *recoveryQueue
@@ -124,7 +121,7 @@ type Conn struct {
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
 
-	resends int
+	resends uint32
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -154,7 +151,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		nackBuf:            bytes.NewBuffer(make([]byte, 0, 256)),
 		readPacket:         &packet{},
 	}
-	c.lastPacketTime.Store(time.Now())
 	c.datagramsReceived.Store([]uint24{})
 	go c.startTicking()
 
@@ -177,16 +173,7 @@ func (conn *Conn) startTicking() {
 				// timed out.
 				conn.sendPing()
 			}
-			// We first check if the other end has actually timed out. If so, we close the conn, as it is
-			// likely the client was disconnected.
-			if t.Sub(conn.lastPacketTime.Load().(time.Time)) > timeout {
-				// If the timeout was long enough, we close the connection.
-				_ = conn.Close()
-				return
-			}
-			if i%2 == 0 {
-				conn.checkResend()
-			}
+			conn.checkResend(t)
 		case <-conn.closeCtx.Done():
 			return
 		}
@@ -195,7 +182,7 @@ func (conn *Conn) startTicking() {
 
 // checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
 // received and sends any packets that have been pending for too long.
-func (conn *Conn) checkResend() {
+func (conn *Conn) checkResend(t time.Time) {
 	received := conn.datagramsReceived.Load().([]uint24)
 	if len(received) > 0 {
 		// Write an ACK packet to the connection containing all datagram sequence numbers that we
@@ -212,11 +199,11 @@ func (conn *Conn) checkResend() {
 	atomic.StoreUint32(&conn.latency, uint32(latency/2))
 
 	// Allow the average delay with a deviation of 200%.
-	delay := latency*3 + ((latency / 2) * time.Duration(conn.resends))
+	delay := latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.resends)
 	for seqNum := range conn.recoveryQueue.queue {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
-		if time.Since(conn.recoveryQueue.Timestamp(seqNum)) > delay {
+		if t.Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
@@ -225,13 +212,11 @@ func (conn *Conn) checkResend() {
 	conn.writeLock.Unlock()
 
 	if l != 0 {
-		conn.resends++
-
-		if conn.resends > 30 {
+		atomic.AddUint32(&conn.resends, uint32(l))
+		if atomic.LoadUint32(&conn.resends) > 50 {
+			// Too many packets not acknowledged in time, the connection was probably closed.
 			_ = conn.Close()
 		}
-	} else if conn.resends > 0 {
-		conn.resends--
 	}
 }
 
@@ -523,9 +508,6 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 // receivePacket handles the receiving of a packet. It puts the packet in the queue and takes out all packets
 // that were obtainable after that, and handles them.
 func (conn *Conn) receivePacket(packet *packet) error {
-	// Update the last time we received a packet so that the connection doesn't time out.
-	conn.lastPacketTime.Store(time.Now())
-
 	if packet.reliability != reliabilityReliableOrdered {
 		// If it isn't a reliable ordered packet, handle it immediately.
 		return conn.handlePacket(packet.content)
@@ -590,6 +572,8 @@ func (conn *Conn) handlePacket(b []byte) error {
 		select {
 		case <-conn.closeCtx.Done():
 		case conn.packetChan <- buffer:
+		default:
+			fmt.Println("Packet chan full")
 		}
 		return nil
 	}
@@ -747,6 +731,7 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	if err := ack.read(b); err != nil {
 		return fmt.Errorf("error reading ACK: %v", err)
 	}
+	success := uint32(0)
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
 		p, ok := conn.recoveryQueue.take(sequenceNumber)
@@ -754,7 +739,13 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 			// Clear the packet and return it to the pool so that it may be re-used.
 			p.content = nil
 			packetPool.Put(p)
+			success++
 		}
+	}
+	if atomic.LoadUint32(&conn.resends) < success {
+		atomic.StoreUint32(&conn.resends, 0)
+	} else {
+		atomic.AddUint32(&conn.resends, ^uint32(success-1))
 	}
 	return nil
 }
