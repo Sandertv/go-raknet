@@ -17,8 +17,6 @@ const (
 	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
 	currentProtocol byte = 10
 
-	// timeout is the timeout after which a conn times out, if it hasn't received a packet for that duration.
-	timeout = time.Second * 10
 	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
 	// missing earlier will be requested to be resent.
 	resendRequestThreshold = 10
