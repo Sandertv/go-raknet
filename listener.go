@@ -166,19 +166,21 @@ func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
 	b := make([]byte, 1500)
+	buf := bytes.NewBuffer(b[:0])
 	for {
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
 			close(listener.incoming)
 			return
 		}
-		buffer := b[:n]
+		_, _ = buf.Write(b[:n])
 
 		// Technically we should not re-use the same byte slice after its ownership has been taken by the
 		// buffer, but we can do this anyway because we copy the data later.
-		if err := listener.handle(bytes.NewBuffer(buffer), addr); err != nil {
+		if err := listener.handle(buf, addr); err != nil {
 			listener.ErrorLog.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
 		}
+		buf.Reset()
 	}
 }
 

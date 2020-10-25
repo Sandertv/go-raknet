@@ -153,7 +153,8 @@ func (conn *wrappedConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
 func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
-	b := make([]byte, 1492)
+	b := make([]byte, 1500)
+	buf := bytes.NewBuffer(b[:0])
 	for {
 		n, err := conn.Read(b)
 		if err != nil {
@@ -164,9 +165,11 @@ func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 			errorLog.Printf("client: error reading from Conn: %v", err)
 			return
 		}
-		if err := rakConn.receive(bytes.NewBuffer(b[:n])); err != nil {
+		buf.Write(b[:n])
+		if err := rakConn.receive(buf); err != nil {
 			errorLog.Printf("error handling packet: %v\n", err)
 		}
+		buf.Reset()
 	}
 }
 
