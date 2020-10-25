@@ -210,8 +210,8 @@ func (conn *Conn) checkResend(t time.Time) {
 	conn.writeLock.Unlock()
 
 	if l != 0 {
-		atomic.AddUint32(&conn.resends, uint32(l))
-		if atomic.LoadUint32(&conn.resends) > 50 {
+		atomic.AddUint32(&conn.resends, 1)
+		if atomic.LoadUint32(&conn.resends) > 100 {
 			// Too many packets not acknowledged in time, the connection was probably closed.
 			_ = conn.Close()
 		}
@@ -570,8 +570,6 @@ func (conn *Conn) handlePacket(b []byte) error {
 		select {
 		case <-conn.closeCtx.Done():
 		case conn.packetChan <- buffer:
-		default:
-			fmt.Println("Packet chan full")
 		}
 		return nil
 	}
