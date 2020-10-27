@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log"
-	"math/rand"
 	"net"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,7 +49,7 @@ func (dialer Dialer) Ping(address string) (response []byte, err error) {
 	}
 
 	buffer := bytes.NewBuffer(nil)
-	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: rand.New(rand.NewSource(time.Now().Unix())).Int63()}).Write(buffer)
+	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&counter, 1)}).Write(buffer)
 	if _, err := conn.Write(buffer.Bytes()); err != nil {
 		return nil, fmt.Errorf("error sending unconnected ping: %v", err)
 	}
@@ -79,6 +79,9 @@ func (dialer Dialer) Ping(address string) (response []byte, err error) {
 	return pong.Data, nil
 }
 
+// counter is a counter used to produce an ID for the client.
+var counter int64
+
 // Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
 // or a hostname, combined with a port that is separated with ':'.
 // Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
@@ -97,7 +100,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 		dialer.ErrorLog = log.New(os.Stderr, "", log.LstdFlags)
 	}
 
-	id := rand.New(rand.NewSource(time.Now().Unix())).Int63()
+	id := atomic.AddInt64(&counter, 1)
 	state := &connState{
 		conn:               udpConn,
 		remoteAddr:         udpConn.RemoteAddr(),
