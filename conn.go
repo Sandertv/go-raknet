@@ -741,7 +741,7 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	if atomic.LoadUint32(&conn.resends) < success {
 		atomic.StoreUint32(&conn.resends, 0)
 	} else {
-		atomic.AddUint32(&conn.resends, ^(success - 1))
+		atomic.AddUint32(&conn.resends, ^uint32(0))
 	}
 	return nil
 }
