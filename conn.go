@@ -96,9 +96,11 @@ type Conn struct {
 	// datagramQueue is an ordered queue used to track which datagrams were received and which datagrams
 	// were missing, so that we can send NACKs to request missing datagrams.
 	datagramQueue *datagramQueue
+
+	datagramsRecvMu sync.Mutex
 	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
 	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
-	datagramsReceived atomic.Value
+	datagramsReceived []uint24
 	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
 	missingDatagramTimes int
 
@@ -149,7 +151,6 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16, id int64, client
 		nackBuf:            bytes.NewBuffer(make([]byte, 0, 256)),
 		readPacket:         &packet{},
 	}
-	c.datagramsReceived.Store([]uint24{})
 	go c.startTicking()
 
 	return c
@@ -181,15 +182,17 @@ func (conn *Conn) startTicking() {
 // checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
 // received and sends any packets that have been pending for too long.
 func (conn *Conn) checkResend(t time.Time) {
-	received := conn.datagramsReceived.Load().([]uint24)
-	if len(received) > 0 {
+	conn.datagramsRecvMu.Lock()
+	if len(conn.datagramsReceived) > 0 {
 		// Write an ACK packet to the connection containing all datagram sequence numbers that we
 		// received since the last tick.
-		if err := conn.sendACK(received...); err != nil {
+		if err := conn.sendACK(conn.datagramsReceived...); err != nil {
 			return
 		}
-		conn.datagramsReceived.Store(received[:0])
+		conn.datagramsReceived = conn.datagramsReceived[:0]
 	}
+	conn.datagramsRecvMu.Unlock()
+
 	conn.writeLock.Lock()
 	var resendSeqNums []uint24
 
@@ -461,8 +464,10 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
+	conn.datagramsRecvMu.Lock()
 	// Add this sequence number to the received datagrams so we ACK it.
-	conn.datagramsReceived.Store(append(conn.datagramsReceived.Load().([]uint24), sequenceNumber))
+	conn.datagramsReceived = append(conn.datagramsReceived, sequenceNumber)
+	conn.datagramsRecvMu.Unlock()
 
 	lowestBefore := conn.datagramQueue.lowest
 	if !conn.datagramQueue.put(sequenceNumber) {
