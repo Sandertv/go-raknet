@@ -114,7 +114,7 @@ func (dialer Dialer) Dial(address string) (*Conn, error) {
 		return nil, fmt.Errorf("error receiving open connection reply: %v", err)
 	}
 
-	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), state.mtuSize, id, true)
+	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)), id, true)
 	go func() {
 		// Wait for the connection to be closed...
 		<-conn.closeCtx.Done()
@@ -185,7 +185,7 @@ type connState struct {
 
 	// mtuSize is the final MTU size found by sending open connection request 1 packets. It is the MTU size
 	// sent by the server.
-	mtuSize int16
+	mtuSize uint32
 
 	// discoveringMTUSize is the current MTU size 'discovered'. This MTU size decreases the more the open
 	// connection request 1 is sent, so that the max packet size can be discovered.
@@ -208,7 +208,7 @@ func (state *connState) openConnectionRequest() (e error) {
 		for {
 			select {
 			case <-c:
-				if err := state.sendOpenConnectionRequest2(state.mtuSize); err != nil {
+				if err := state.sendOpenConnectionRequest2(int16(atomic.LoadUint32(&state.mtuSize))); err != nil {
 					e = err
 					return
 				}
@@ -241,7 +241,7 @@ func (state *connState) openConnectionRequest() (e error) {
 		if err := reply.Read(buffer); err != nil {
 			return fmt.Errorf("error reading open connection reply 2: %v", err)
 		}
-		state.mtuSize = reply.MTUSize
+		atomic.StoreUint32(&state.mtuSize, uint32(reply.MTUSize))
 		return
 	}
 }
@@ -310,7 +310,7 @@ func (state *connState) discoverMTUSize() (e error) {
 				staticMTU = state.discoveringMTUSize + 40
 				continue
 			}
-			state.mtuSize = response.ServerPreferredMTUSize
+			atomic.StoreUint32(&state.mtuSize, uint32(response.ServerPreferredMTUSize))
 			return
 		case message.IDIncompatibleProtocolVersion:
 			response := &message.IncompatibleProtocolVersion{}
