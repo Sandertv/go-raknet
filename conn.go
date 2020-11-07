@@ -172,16 +172,18 @@ func (conn *Conn) startTicking() {
 				// timed out.
 				conn.sendPing()
 			}
-			conn.checkResend(t)
+			conn.flushACKs()
+			if i%2 == 0 {
+				conn.checkResend(t)
+			}
 		case <-conn.closeCtx.Done():
 			return
 		}
 	}
 }
 
-// checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
-// received and sends any packets that have been pending for too long.
-func (conn *Conn) checkResend(t time.Time) {
+// flushACKs flushes all pending datagram acknowledgements.
+func (conn *Conn) flushACKs() {
 	conn.datagramsRecvMu.Lock()
 	if len(conn.datagramsReceived) > 0 {
 		// Write an ACK packet to the connection containing all datagram sequence numbers that we
@@ -192,7 +194,11 @@ func (conn *Conn) checkResend(t time.Time) {
 		conn.datagramsReceived = conn.datagramsReceived[:0]
 	}
 	conn.datagramsRecvMu.Unlock()
+}
 
+// checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
+// received and sends any packets that have been pending for too long.
+func (conn *Conn) checkResend(t time.Time) {
 	conn.writeLock.Lock()
 	var resendSeqNums []uint24
 
@@ -201,10 +207,10 @@ func (conn *Conn) checkResend(t time.Time) {
 
 	// Allow the average delay with a deviation of 200%.
 	delay := latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.resends)
-	for seqNum := range conn.recoveryQueue.queue {
+	for seqNum, timestamp := range conn.recoveryQueue.timestamps {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
-		if t.Sub(conn.recoveryQueue.Timestamp(seqNum)) > delay {
+		if t.Sub(timestamp) > delay {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
