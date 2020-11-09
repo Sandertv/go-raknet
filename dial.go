@@ -152,10 +152,6 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	}
 
 	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)))
-	go func() {
-		<-conn.connected
-		_ = conn.conn.Close()
-	}()
 	if err := conn.requestConnection(id); err != nil {
 		return nil, timeout
 	}
