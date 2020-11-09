@@ -438,16 +438,15 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	if !conn.datagramQueue.put(sequenceNumber) {
 		return fmt.Errorf("error handing datagram: datagram already received")
 	}
+	conn.datagramQueue.clear()
 
 	if conn.datagramQueue.lowest == lowestBefore {
 		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
 		// increment the dialerID, and if it exceeds the threshold we send a NACK to request again.
 		conn.missingDatagramTimes++
 		if conn.missingDatagramTimes >= resendRequestThreshold {
-			if missing := conn.datagramQueue.missing(); len(missing) != 0 {
-				if err := conn.sendNACK(missing); err != nil {
-					return fmt.Errorf("error sending NACK to request datagrams: %v", err)
-				}
+			if err := conn.sendNACK(conn.datagramQueue.missing()); err != nil {
+				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
 			conn.missingDatagramTimes = 0
 		}

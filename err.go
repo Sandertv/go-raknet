@@ -11,7 +11,7 @@ var (
 	errCancelled      = errors.New("operation was cancelled")
 	errBufferTooSmall = errors.New("a message sent was larger than the buffer used to receive the message into")
 
-	errListenerClosed = errors.New("use of closed listener ")
+	errListenerClosed = errors.New("use of closed listener")
 
 	errConnectionTimeout = timeoutErr{err: errors.New("connection attempt timed out")}
 
