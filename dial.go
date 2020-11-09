@@ -6,20 +6,12 @@ import (
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"sync/atomic"
 	"time"
 )
-
-// Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
-// or a hostname, combined with a port that is separated with ':'.
-// Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
-// connection will timeout and an error will be returned.
-// Dial fills out a Dialer struct with a default error logger and raknet.currentProtocol as protocol.
-func Dial(address string) (*Conn, error) {
-	return Dialer{}.Dial(address)
-}
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
@@ -28,6 +20,32 @@ func Dial(address string) (*Conn, error) {
 // sendPing fills out a Dialer struct with raknet.currentProtocol as protocol.
 func Ping(address string) (response []byte, err error) {
 	return Dialer{}.Ping(address)
+}
+
+// Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
+// or a hostname, combined with a port that is separated with ':'.
+// Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
+// connection will timeout and an error will be returned.
+// Dial fills out a Dialer struct with a default error logger.
+func Dial(address string) (*Conn, error) {
+	return Dialer{}.Dial(address)
+}
+
+// DialTimeout attempts to dial a RakNet connection to the address passed. The address may be either an IP
+// address or a hostname, combined with a port that is separated with ':'.
+// DialTimeout will attempt to dial a connection within the timeout duration passed. If not all packets are
+// received after that, the connection will timeout and an error will be returned.
+func DialTimeout(address string, timeout time.Duration) (*Conn, error) {
+	return Dialer{}.DialTimeout(address, timeout)
+}
+
+// DialContext attempts to dial a RakNet connection to the address passed. The address may be either an IP
+// address or a hostname, combined with a port that is separated with ':'.
+// DialContext will use the deadline (ctx.Deadline) of the context.Context passed for the maximum amount of
+// time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
+// closed.
+func DialContext(ctx context.Context, address string) (*Conn, error) {
+	return Dialer{}.DialContext(ctx, address)
 }
 
 // Dialer allows dialing a RakNet connection with specific configuration, such as the protocol version of the
@@ -42,100 +60,114 @@ type Dialer struct {
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
+// Ping will timeout after 5 seconds.
 func (dialer Dialer) Ping(address string) (response []byte, err error) {
 	conn, err := net.Dial("udp", address)
 	if err != nil {
-		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 
 	buffer := bytes.NewBuffer(nil)
-	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&counter, 1)}).Write(buffer)
+	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&dialerID, 1)}).Write(buffer)
 	if _, err := conn.Write(buffer.Bytes()); err != nil {
-		return nil, fmt.Errorf("error sending unconnected ping: %v", err)
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	buffer.Reset()
-
-	// Set a read deadline so that we get a timeout if the server doesn't respond to us.
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 
 	data := make([]byte, 1492)
 	n, err := conn.Read(data)
 	if err != nil {
-		return nil, fmt.Errorf("timeout reading the response: %v", err)
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	data = data[:n]
 
 	_, _ = buffer.Write(data)
-	if b, err := buffer.ReadByte(); err != nil {
-		return nil, fmt.Errorf("error reading unconnected pong ID: %v", err)
-	} else if b != message.IDUnconnectedPong {
-		return nil, fmt.Errorf("response pong did not have unconnected pong ID")
+	if b, err := buffer.ReadByte(); err != nil || b != message.IDUnconnectedPong {
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: errInvalidUnconnectedPong}
 	}
 	pong := &message.UnconnectedPong{}
 	if err := pong.Read(buffer); err != nil {
-		return nil, fmt.Errorf("error decoding unconnected pong: %v", err)
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: errInvalidUnconnectedPong}
 	}
 	_ = conn.Close()
 	return pong.Data, nil
 }
 
-// counter is a counter used to produce an ID for the client.
-var counter int64
+// dialerID is a counter used to produce an ID for the client.
+var dialerID = rand.New(rand.NewSource(time.Now().Unix())).Int63()
 
 // Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
 // or a hostname, combined with a port that is separated with ':'.
 // Dial will attempt to dial a connection within 10 seconds. If not all packets are received after that, the
 // connection will timeout and an error will be returned.
-// Dial will fill out any values left as their empty values with the default values of those fields.
 func (dialer Dialer) Dial(address string) (*Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	return dialer.DialContext(ctx, address)
+}
+
+// DialTimeout attempts to dial a RakNet connection to the address passed. The address may be either an IP
+// address or a hostname, combined with a port that is separated with ':'.
+// DialTimeout will attempt to dial a connection within the timeout duration passed. If not all packets are
+// received after that, the connection will timeout and an error will be returned.
+func (dialer Dialer) DialTimeout(address string, timeout time.Duration) (*Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return dialer.DialContext(ctx, address)
+}
+
+// DialContext attempts to dial a RakNet connection to the address passed. The address may be either an IP
+// address or a hostname, combined with a port that is separated with ':'.
+// DialContext will use the deadline (ctx.Deadline) of the context.Context passed for the maximum amount of
+// time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
+// closed.
+func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, error) {
 	udpConn, err := net.Dial("udp", address)
 	if err != nil {
-		return nil, fmt.Errorf("error dialing UDP conn: %v", err)
+		return nil, &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	packetConn := udpConn.(net.PacketConn)
 
-	_ = udpConn.SetReadDeadline(time.Now().Add(time.Second * 10))
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = packetConn.SetDeadline(deadline)
+	}
 
+	id := atomic.AddInt64(&dialerID, 1)
 	if dialer.ErrorLog == nil {
 		dialer.ErrorLog = log.New(os.Stderr, "", log.LstdFlags)
 	}
-
-	id := atomic.AddInt64(&counter, 1)
 	state := &connState{
 		conn:               udpConn,
 		remoteAddr:         udpConn.RemoteAddr(),
 		discoveringMTUSize: 1492,
 		id:                 id,
 	}
-	if err := state.discoverMTUSize(); err != nil {
-		return nil, fmt.Errorf("error discovering MTU size: %v", err)
-	}
-	if err := state.openConnectionRequest(); err != nil {
-		return nil, fmt.Errorf("error receiving open connection reply: %v", err)
+	timeout := &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: errConnectionTimeout}
+
+	if err := state.discoverMTUSize(ctx); err != nil {
+		return nil, timeout
+	} else if err := state.openConnectionRequest(ctx); err != nil {
+		return nil, timeout
 	}
 
-	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)), id, true)
+	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)))
 	go func() {
-		// Wait for the connection to be closed...
-		<-conn.closeCtx.Done()
-		if err := conn.conn.Close(); err != nil {
-			// Should not happen.
-			panic(err)
-		}
+		<-conn.connected
+		_ = conn.conn.Close()
 	}()
-	if err := conn.requestConnection(); err != nil {
-		return nil, fmt.Errorf("error requesting connection: %v", err)
+	if err := conn.requestConnection(id); err != nil {
+		return nil, timeout
 	}
 
 	go clientListen(conn, udpConn, dialer.ErrorLog)
 	select {
-	case <-conn.completingSequence.Done():
-		// Clear all read deadlines as we no longer need these.
-		_ = udpConn.SetReadDeadline(time.Time{})
-		_ = conn.SetReadDeadline(time.Time{})
+	case <-conn.connected:
+		_ = packetConn.SetDeadline(time.Time{})
 		return conn, nil
-	case <-time.After(time.Second * 10):
-		return nil, fmt.Errorf("error establishing a connection: connection timed out")
+	case <-ctx.Done():
+		_ = conn.Close()
+		return nil, timeout
 	}
 }
 
@@ -194,12 +226,13 @@ type connState struct {
 
 // openConnectionRequest sends open connection request 2 packets continuously until it receives an open
 // connection reply 2 packet from the server.
-func (state *connState) openConnectionRequest() (e error) {
+func (state *connState) openConnectionRequest(ctx context.Context) (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
-	stop := make(chan bool, 1)
+
+	stop := make(chan bool)
 	defer func() {
-		stop <- true
+		close(stop)
 	}()
 	// Use an intermediate channel to start the ticker immediately.
 	c := make(chan struct{}, 1)
@@ -215,6 +248,9 @@ func (state *connState) openConnectionRequest() (e error) {
 			case <-ticker.C:
 				c <- struct{}{}
 			case <-stop:
+				return
+			case <-ctx.Done():
+				_ = state.conn.Close()
 				return
 			}
 		}
@@ -248,14 +284,14 @@ func (state *connState) openConnectionRequest() (e error) {
 
 // discoverMTUSize starts discovering an MTU size, the maximum packet size we can send, by sending multiple
 // open connection request 1 packets to the server with a decreasing MTU size padding.
-func (state *connState) discoverMTUSize() (e error) {
+func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
 	var staticMTU int16
 
-	ctx, cancel := context.WithCancel(context.Background())
+	stop := make(chan struct{})
 	defer func() {
-		cancel()
+		close(stop)
 	}()
 	// Use an intermediate channel to start the ticker immediately.
 	c := make(chan struct{}, 1)
@@ -279,7 +315,10 @@ func (state *connState) discoverMTUSize() (e error) {
 				}
 			case <-ticker.C:
 				c <- struct{}{}
+			case <-stop:
+				return
 			case <-ctx.Done():
+				_ = state.conn.Close()
 				return
 			}
 		}

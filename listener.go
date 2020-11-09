@@ -2,7 +2,6 @@ package raknet
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log"
@@ -16,13 +15,23 @@ import (
 	"time"
 )
 
+// ListenConfig may be used to pass additional configuration to a Listener.
+type ListenConfig struct {
+	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
+	// simply discards the messages.
+	ErrorLog *log.Logger
+}
+
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
 // TCPListener in the net package.
 // Listener implements the net.Listener interface.
 type Listener struct {
-	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
+	once   sync.Once
+	closed chan struct{}
+
+	// log is a logger that errors from packet decoding are logged to. It may be set to a logger that
 	// simply discards the messages.
-	ErrorLog *log.Logger
+	log *log.Logger
 
 	conn net.PacketConn
 	// incoming is a channel of incoming connections. Connections that end up in here will also end up in
@@ -31,9 +40,6 @@ type Listener struct {
 
 	// connections is a map of currently active connections, indexed by their address.
 	connections sync.Map
-
-	closeCtx context.Context
-	close    context.CancelFunc
 
 	// id is a random server ID generated upon starting listening. It is used several times throughout the
 	// connection sequence of RakNet.
@@ -44,28 +50,28 @@ type Listener struct {
 	pongData atomic.Value
 }
 
+// listenerID holds the next ID to use for a Listener.
+var listenerID = rand.New(rand.NewSource(time.Now().Unix())).Int63()
+
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
 // successful, an error is returned.
 // The address follows the same rules as those defined in the net.TCPListen() function.
-// Specific features of the listener may be modified once it is returned, such as the used ErrorLog and/or the
+// Specific features of the listener may be modified once it is returned, such as the used log and/or the
 // accepted protocol.
-func Listen(address string) (*Listener, error) {
+func (l ListenConfig) Listen(address string) (*Listener, error) {
 	conn, err := net.ListenPacket("udp", address)
 	if err != nil {
-		return nil, fmt.Errorf("error creating UDP listener: %v", err)
+		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
-
-	// Seed the global rand so we can get a random ID.
-	rand.Seed(time.Now().Unix())
-	ctx, cancel := context.WithCancel(context.Background())
-
 	listener := &Listener{
-		ErrorLog: log.New(os.Stderr, "", log.LstdFlags),
 		conn:     conn,
 		incoming: make(chan *Conn, 128),
-		closeCtx: ctx,
-		close:    cancel,
-		id:       rand.Int63(),
+		closed:   make(chan struct{}),
+		log:      log.New(os.Stderr, "", log.LstdFlags),
+		id:       atomic.AddInt64(&listenerID, 1),
+	}
+	if l.ErrorLog != nil {
+		listener.log = l.ErrorLog
 	}
 	listener.pongData.Store([]byte{})
 	go listener.listen()
@@ -73,13 +79,23 @@ func Listen(address string) (*Listener, error) {
 	return listener, nil
 }
 
+// Listen listens on the address passed and returns a listener that may be used to accept connections. If not
+// successful, an error is returned.
+// The address follows the same rules as those defined in the net.TCPListen() function.
+// Specific features of the listener may be modified once it is returned, such as the used log and/or the
+// accepted protocol.
+func Listen(address string) (*Listener, error) {
+	var lc ListenConfig
+	return lc.Listen(address)
+}
+
 // Accept blocks until a connection can be accepted by the listener. If successful, Accept returns a
-// connection that is ready to send and receive data. If not successful, a nil listener is returned and an error
-// describing the problem.
+// connection that is ready to send and receive data. If not successful, a nil listener is returned and an
+// error describing the problem.
 func (listener *Listener) Accept() (net.Conn, error) {
 	conn, ok := <-listener.incoming
 	if !ok {
-		return nil, fmt.Errorf("error accepting connection: listener closed")
+		return nil, &net.OpError{Op: "accept", Net: "raknet", Source: nil, Addr: nil, Err: errListenerClosed}
 	}
 	return conn, nil
 }
@@ -92,11 +108,12 @@ func (listener *Listener) Addr() net.Addr {
 // Close closes the listener so that it may be cleaned up. It makes sure the goroutine handling incoming
 // packets is able to be freed.
 func (listener *Listener) Close() error {
-	listener.close()
-	if err := listener.conn.Close(); err != nil {
-		return fmt.Errorf("error closing UDP listener: %v", err)
-	}
-	return nil
+	var err error
+	listener.once.Do(func() {
+		close(listener.closed)
+		err = listener.conn.Close()
+	})
+	return err
 }
 
 // PongData sets the pong data that is used to respond with when a client sends a ping. It usually holds game
@@ -117,7 +134,7 @@ func (listener *Listener) PongData(data []byte) {
 // each update.
 func (listener *Listener) HijackPong(address string) error {
 	if _, err := net.ResolveUDPAddr("udp", address); err != nil {
-		return fmt.Errorf("error resolving UDP address: %v", err)
+		return &net.OpError{Op: "hijack pong", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -147,7 +164,7 @@ func (listener *Listener) HijackPong(address string) error {
 				} else {
 					listener.PongData(data)
 				}
-			case <-listener.closeCtx.Done():
+			case <-listener.closed:
 				return
 			}
 		}
@@ -161,7 +178,7 @@ func (listener *Listener) ID() int64 {
 	return listener.id
 }
 
-// listen continuously reads from the listener's UDP connection, until closeCtx has a value in it.
+// listen continuously reads from the listener's UDP connection, until closed has a value in it.
 func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is allowed to have. We can re-use
 	// this buffer for each packet.
@@ -178,7 +195,7 @@ func (listener *Listener) listen() {
 		// Technically we should not re-use the same byte slice after its ownership has been taken by the
 		// buffer, but we can do this anyway because we copy the data later.
 		if err := listener.handle(buf, addr); err != nil {
-			listener.ErrorLog.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
+			listener.log.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
 		}
 		buf.Reset()
 	}
@@ -196,7 +213,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			return fmt.Errorf("error reading packet ID byte: %v", err)
 		}
 		switch packetID {
-		case message.IDUnconnectedPing:
+		case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
 			return listener.handleUnconnectedPing(b, addr)
 		case message.IDOpenConnectionRequest1:
 			return listener.handleOpenConnectionRequest1(b, addr)
@@ -213,7 +230,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 	}
 	conn := value.(*Conn)
 	select {
-	case <-conn.closeCtx.Done():
+	case <-conn.closed:
 		// Connection was closed already.
 		return nil
 	default:
@@ -240,22 +257,22 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
 
-	conn := newConn(listener.conn, addr, packet.ClientPreferredMTUSize, packet.ClientGUID, false)
+	conn := newConn(listener.conn, addr, packet.ClientPreferredMTUSize)
 	listener.connections.Store(addr.String(), conn)
 
 	go func() {
-		<-conn.closeCtx.Done()
+		<-conn.closed
 		listener.connections.Delete(conn.addr.String())
 	}()
 	go func() {
 		select {
-		case <-conn.completingSequence.Done():
+		case <-conn.connected:
 			// Add the connection to the incoming channel so that a caller of Accept() can receive it.
 			listener.incoming <- conn
-		case <-listener.closeCtx.Done():
+		case <-listener.closed:
 			_ = conn.Close()
 		case <-time.After(time.Second * 10):
-			// It took too long to complete this connection. We close it and go back to accepting.
+			// It took too long to complete this connection. We closed it and go back to accepting.
 			_ = conn.Close()
 		}
 	}()

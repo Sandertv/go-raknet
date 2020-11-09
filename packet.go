@@ -56,17 +56,13 @@ type packet struct {
 }
 
 // write writes the packet and its content to the buffer passed.
-func (packet *packet) write(b *bytes.Buffer) error {
+func (packet *packet) write(b *bytes.Buffer) {
 	header := packet.reliability << 5
 	if packet.split {
 		header |= splitFlag
 	}
-	if err := b.WriteByte(header); err != nil {
-		return fmt.Errorf("error writing packet header: %v", err)
-	}
-	if err := binary.Write(b, binary.BigEndian, uint16(len(packet.content))<<3); err != nil {
-		return fmt.Errorf("error writing packet content length: %v", err)
-	}
+	b.WriteByte(header)
+	_ = binary.Write(b, binary.BigEndian, uint16(len(packet.content))<<3)
 	if packet.reliable() {
 		writeUint24(b, packet.messageIndex)
 	}
@@ -76,23 +72,14 @@ func (packet *packet) write(b *bytes.Buffer) error {
 	if packet.sequencedOrOrdered() {
 		writeUint24(b, packet.orderIndex)
 		// Order channel, we don't care about this.
-		_ = b.WriteByte(0)
+		b.WriteByte(0)
 	}
 	if packet.split {
-		if err := binary.Write(b, binary.BigEndian, packet.splitCount); err != nil {
-			return fmt.Errorf("error writing packet split count: %v", err)
-		}
-		if err := binary.Write(b, binary.BigEndian, packet.splitID); err != nil {
-			return fmt.Errorf("error writing packet split ID: %v", err)
-		}
-		if err := binary.Write(b, binary.BigEndian, packet.splitIndex); err != nil {
-			return fmt.Errorf("error writing packet split index: %v", err)
-		}
+		_ = binary.Write(b, binary.BigEndian, packet.splitCount)
+		_ = binary.Write(b, binary.BigEndian, packet.splitID)
+		_ = binary.Write(b, binary.BigEndian, packet.splitIndex)
 	}
-	if _, err := b.Write(packet.content); err != nil {
-		return fmt.Errorf("error writing packet content: %v", err)
-	}
-	return nil
+	b.Write(packet.content)
 }
 
 // read reads a packet and its content from the buffer passed.
