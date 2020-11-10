@@ -91,7 +91,7 @@ type Conn struct {
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
 
-	resends uint32
+	resends int32
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -182,8 +182,8 @@ func (conn *Conn) checkResend(t time.Time) {
 	conn.mu.Unlock()
 
 	if l != 0 {
-		atomic.AddUint32(&conn.resends, 1)
-		if atomic.LoadUint32(&conn.resends) > 100 {
+		atomic.AddInt32(&conn.resends, 1)
+		if atomic.LoadInt32(&conn.resends) > 30 {
 			// Too many packets not acknowledged in time, the connection was probably closed.
 			_ = conn.Close()
 		}
@@ -691,7 +691,7 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	if err := ack.read(b); err != nil {
 		return fmt.Errorf("error reading ACK: %v", err)
 	}
-	success := uint32(0)
+	success := int32(0)
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
 		p, ok := conn.recoveryQueue.take(sequenceNumber)
@@ -702,10 +702,8 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 			success++
 		}
 	}
-	if atomic.LoadUint32(&conn.resends) < success {
-		atomic.StoreUint32(&conn.resends, 0)
-	} else {
-		atomic.AddUint32(&conn.resends, ^uint32(0))
+	if atomic.LoadInt32(&conn.resends) != 0 {
+		atomic.AddInt32(&conn.resends, -1)
 	}
 	return nil
 }
