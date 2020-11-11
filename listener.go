@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,52 +123,6 @@ func (listener *Listener) PongData(data []byte) {
 		panic(fmt.Sprintf("error setting pong data: pong data must not be longer than %v", math.MaxInt16))
 	}
 	listener.pongData.Store(data)
-}
-
-// HijackPong hijacks the pong response from a server at an address passed. The listener passed will
-// continuously update its pong data by hijacking the pong data of the server at the address.
-// The hijack will last until the listener is shut down.
-// If the address passed could not be resolved, an error is returned.
-// Calling HijackPong means that any current and future pong data set using listener.PongData is overwritten
-// each update.
-func (listener *Listener) HijackPong(address string) error {
-	if _, err := net.ResolveUDPAddr("udp", address); err != nil {
-		return &net.OpError{Op: "hijack pong", Net: "raknet", Source: nil, Addr: nil, Err: err}
-	}
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				data, err := Ping(address)
-				if err != nil {
-					// It's okay if these packets are lost sometimes. There's no need to log this.
-					continue
-				}
-				//noinspection SpellCheckingInspection
-				if string(data[:4]) == "MCPE" {
-					fragments := bytes.Split(data, []byte{';'})
-					for len(fragments) < 9 {
-						// Append to the fragments if it's not at least 9 elements long.
-						fragments = append(fragments, nil)
-					}
-
-					fragments = fragments[:9]
-					fragments[6] = []byte(strconv.Itoa(int(listener.id)))
-					fragments[7] = []byte("Proxy")
-					fragments[8] = []byte{}
-
-					listener.PongData(bytes.Join(fragments, []byte{';'}))
-				} else {
-					listener.PongData(data)
-				}
-			case <-listener.closed:
-				return
-			}
-		}
-	}()
-	return nil
 }
 
 // ID returns the unique ID of the listener. This ID is usually used by a client to identify a specific

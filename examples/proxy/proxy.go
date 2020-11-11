@@ -13,12 +13,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// We hijack the pong of a Minecraft server, so our proxy will continuously send the pong data of the
-	// server.
-	//noinspection SpellCheckingInspection
-	if err := listener.HijackPong("mco.mineplex.com:19132"); err != nil {
-		panic(err)
-	}
 
 	for {
 		conn, err := listener.Accept()
