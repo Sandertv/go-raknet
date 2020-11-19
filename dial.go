@@ -17,9 +17,32 @@ import (
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
-// sendPing fills out a Dialer struct with raknet.currentProtocol as protocol.
+// Ping will timeout after 5 seconds.
 func Ping(address string) (response []byte, err error) {
-	return Dialer{}.Ping(address)
+	var d Dialer
+	return d.Ping(address)
+}
+
+// PingTimeout sends a ping to an address and returns the response obtained. If successful, a non-nil response
+// byte slice containing the data is returned. If the ping failed, an error is returned describing the
+// failure.
+// Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
+// is returned which implies a timeout occurred.
+// PingTimeout will time out after the duration passed.
+func PingTimeout(address string, timeout time.Duration) ([]byte, error) {
+	var d Dialer
+	return d.PingTimeout(address, timeout)
+}
+
+// PingContext sends a ping to an address and returns the response obtained. If successful, a non-nil response
+// byte slice containing the data is returned. If the ping failed, an error is returned describing the
+// failure.
+// Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case,
+// PingContext could last indefinitely, hence a timeout should always be attached to the context passed.
+// PingContext cancels as soon as the deadline expires.
+func PingContext(ctx context.Context, address string) (response []byte, err error) {
+	var d Dialer
+	return d.PingContext(ctx, address)
 }
 
 // Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
@@ -28,7 +51,8 @@ func Ping(address string) (response []byte, err error) {
 // connection will timeout and an error will be returned.
 // Dial fills out a Dialer struct with a default error logger.
 func Dial(address string) (*Conn, error) {
-	return Dialer{}.Dial(address)
+	var d Dialer
+	return d.Dial(address)
 }
 
 // DialTimeout attempts to dial a RakNet connection to the address passed. The address may be either an IP
@@ -36,7 +60,8 @@ func Dial(address string) (*Conn, error) {
 // DialTimeout will attempt to dial a connection within the timeout duration passed. If not all packets are
 // received after that, the connection will timeout and an error will be returned.
 func DialTimeout(address string, timeout time.Duration) (*Conn, error) {
-	return Dialer{}.DialTimeout(address, timeout)
+	var d Dialer
+	return d.DialTimeout(address, timeout)
 }
 
 // DialContext attempts to dial a RakNet connection to the address passed. The address may be either an IP
@@ -45,7 +70,8 @@ func DialTimeout(address string, timeout time.Duration) (*Conn, error) {
 // time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
 // closed.
 func DialContext(ctx context.Context, address string) (*Conn, error) {
-	return Dialer{}.DialContext(ctx, address)
+	var d Dialer
+	return d.DialContext(ctx, address)
 }
 
 // Dialer allows dialing a RakNet connection with specific configuration, such as the protocol version of the
@@ -61,24 +87,62 @@ type Dialer struct {
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
 // is returned which implies a timeout occurred.
 // Ping will timeout after 5 seconds.
-func (dialer Dialer) Ping(address string) (response []byte, err error) {
+func (dialer Dialer) Ping(address string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	return dialer.PingContext(ctx, address)
+}
+
+// PingTimeout sends a ping to an address and returns the response obtained. If successful, a non-nil response
+// byte slice containing the data is returned. If the ping failed, an error is returned describing the
+// failure.
+// Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
+// is returned which implies a timeout occurred.
+// PingTimeout will time out after the duration passed.
+func (dialer Dialer) PingTimeout(address string, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return dialer.PingContext(ctx, address)
+}
+
+// PingContext sends a ping to an address and returns the response obtained. If successful, a non-nil response
+// byte slice containing the data is returned. If the ping failed, an error is returned describing the
+// failure.
+// Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case,
+// PingContext could last indefinitely, hence a timeout should always be attached to the context passed.
+// PingContext cancels as soon as the deadline expires.
+func (dialer Dialer) PingContext(ctx context.Context, address string) (response []byte, err error) {
 	conn, err := net.Dial("udp", address)
 	if err != nil {
 		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second * 5))
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			_ = conn.Close()
+		}
+	}()
+	actual := func(e error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return e
+	}
 
 	buffer := bytes.NewBuffer(nil)
 	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&dialerID, 1)}).Write(buffer)
 	if _, err := conn.Write(buffer.Bytes()); err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: actual(err)}
 	}
 	buffer.Reset()
 
 	data := make([]byte, 1492)
 	n, err := conn.Read(data)
 	if err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
+		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: actual(err)}
 	}
 	data = data[:n]
 
