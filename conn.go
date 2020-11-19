@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"net"
@@ -276,7 +277,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	case <-conn.closed:
 		return 0, conn.wrap(errClosed, "read")
 	case <-conn.readDeadline:
-		return 0, conn.wrapTimeout(errCancelled, "read")
+		return 0, conn.wrap(context.DeadlineExceeded, "read")
 	}
 }
 
@@ -290,7 +291,7 @@ func (conn *Conn) ReadPacket() (b []byte, err error) {
 	case <-conn.closed:
 		return nil, conn.wrap(errClosed, "read")
 	case <-conn.readDeadline:
-		return nil, conn.wrapTimeout(errCancelled, "read")
+		return nil, conn.wrap(context.DeadlineExceeded, "read")
 	}
 }
 
@@ -323,7 +324,7 @@ func (conn *Conn) SetReadDeadline(t time.Time) error {
 		return nil
 	}
 	if t.Before(time.Now()) {
-		return fmt.Errorf("read deadline cannot be before now")
+		panic(fmt.Errorf("read deadline cannot be before now"))
 	}
 	conn.readDeadline = time.After(time.Until(t))
 	return nil

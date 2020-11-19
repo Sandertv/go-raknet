@@ -143,17 +143,19 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		discoveringMTUSize: 1492,
 		id:                 id,
 	}
-	timeout := &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: errConnectionTimeout}
+	timeout := func(ctx context.Context) error {
+		return &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: ctx.Err()}
+	}
 
 	if err := state.discoverMTUSize(ctx); err != nil {
-		return nil, timeout
+		return nil, timeout(ctx)
 	} else if err := state.openConnectionRequest(ctx); err != nil {
-		return nil, timeout
+		return nil, timeout(ctx)
 	}
 
 	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)))
 	if err := conn.requestConnection(id); err != nil {
-		return nil, timeout
+		return nil, timeout(ctx)
 	}
 
 	go clientListen(conn, udpConn, dialer.ErrorLog)
@@ -163,7 +165,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		return conn, nil
 	case <-ctx.Done():
 		_ = conn.Close()
-		return nil, timeout
+		return nil, timeout(ctx)
 	}
 }
 
