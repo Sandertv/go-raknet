@@ -63,7 +63,7 @@ For an example on how to apply these and other methods in order to create a prox
 folder.
 
 ### Documentation
-Documentation may be found [here](https://godoc.org/github.com/Sandertv/go-raknet).
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/sandertv/go-raknet)](https://pkg.go.dev/github.com/sandertv/go-raknet)
 
 ## Contact
 [![Chat on Discord](https://img.shields.io/badge/Chat-On%20Discord-738BD7.svg?style=for-the-badge)](https://discord.gg/evzQR4R)
