@@ -1,18 +1,19 @@
-package raknet
+package raknet_test
 
 import (
 	"fmt"
+	"github.com/sandertv/go-raknet"
 	"testing"
 	"time"
 )
 
 func TestListen(t *testing.T) {
-	l, err := Listen(":19132")
+	l, err := raknet.Listen(":19132")
 	if err != nil {
 		panic(err)
 	}
 	go func() {
-		_, _ = Dial("127.0.0.1:19132")
+		_, _ = raknet.Dial("127.0.0.1:19132")
 	}()
 	c := make(chan error)
 	go accept(l, c)
@@ -27,7 +28,7 @@ func TestListen(t *testing.T) {
 	}
 }
 
-func accept(l *Listener, c chan error) {
+func accept(l *raknet.Listener, c chan error) {
 	if _, err := l.Accept(); err != nil {
 		c <- fmt.Errorf("error accepting connection: %v", err)
 	}

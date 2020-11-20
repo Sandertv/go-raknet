@@ -1,6 +1,7 @@
-package raknet
+package raknet_test
 
 import (
+	"github.com/sandertv/go-raknet"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,7 @@ func TestPing(t *testing.T) {
 		prefix = "MCPE"
 	)
 
-	data, err := Ping(addr)
+	data, err := raknet.Ping(addr)
 	if err != nil {
 		t.Fatalf("error pinging %v: %v", addr, err)
 	}
@@ -28,11 +29,11 @@ func TestDial(t *testing.T) {
 		addr = "mco.mineplex.com:19132"
 	)
 
-	conn, err := Dial(addr)
+	conn, err := raknet.Dial(addr)
 	if err != nil {
 		t.Fatalf("error connecting to %v: %v", addr, err)
 	}
-	if conn.mtuSize < 1200 || conn.mtuSize > 1500 {
-		t.Fatalf("expected MTU size is bigger than 1200 and smaller than 1500, but got %v", conn.mtuSize)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("error closing connection: %v", err)
 	}
 }
