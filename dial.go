@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal/message"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal/message"
 )
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
@@ -80,6 +81,9 @@ type Dialer struct {
 	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
 	// simply discards the messages.
 	ErrorLog *log.Logger
+
+	// UpstreamDialer is a dialer that is used for opening udp connections.
+	UpstreamDialer net.Dialer
 }
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
@@ -112,7 +116,7 @@ func (dialer Dialer) PingTimeout(address string, timeout time.Duration) ([]byte,
 // PingContext could last indefinitely, hence a timeout should always be attached to the context passed.
 // PingContext cancels as soon as the deadline expires.
 func (dialer Dialer) PingContext(ctx context.Context, address string) (response []byte, err error) {
-	conn, err := net.Dial("udp", address)
+	conn, err := dialer.UpstreamDialer.Dial("udp", address)
 	if err != nil {
 		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
@@ -187,7 +191,7 @@ func (dialer Dialer) DialTimeout(address string, timeout time.Duration) (*Conn, 
 // time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
 // closed.
 func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, error) {
-	udpConn, err := net.Dial("udp", address)
+	udpConn, err := dialer.UpstreamDialer.Dial("udp", address)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
