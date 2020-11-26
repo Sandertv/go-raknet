@@ -222,6 +222,11 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	}
 
 	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)))
+	conn.close = func() {
+		// We have to make the Conn call this method explicitly because it must not close the connection
+		// established by the Listener. (This would close the entire listener.)
+		_ = udpConn.Close()
+	}
 	if err := conn.requestConnection(id); err != nil {
 		return nil, timeout(ctx)
 	}

@@ -45,6 +45,7 @@ type Conn struct {
 
 	once              sync.Once
 	closed, connected chan struct{}
+	close             func()
 
 	mu  sync.Mutex
 	buf *bytes.Buffer
@@ -300,6 +301,10 @@ func (conn *Conn) Close() error {
 	conn.once.Do(func() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
 		close(conn.closed)
+		if conn.close != nil {
+			conn.close()
+			conn.close = nil
+		}
 	})
 	return nil
 }
