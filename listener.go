@@ -218,13 +218,15 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 		listener.connections.Delete(conn.addr.String())
 	}()
 	go func() {
+		t := time.NewTimer(time.Second * 10)
+		defer t.Stop()
 		select {
 		case <-conn.connected:
 			// Add the connection to the incoming channel so that a caller of Accept() can receive it.
 			listener.incoming <- conn
 		case <-listener.closed:
 			_ = conn.Close()
-		case <-time.After(time.Second * 10):
+		case <-t.C:
 			// It took too long to complete this connection. We closed it and go back to accepting.
 			_ = conn.Close()
 		}
