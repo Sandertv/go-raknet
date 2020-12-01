@@ -708,7 +708,7 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 			success++
 		}
 	}
-	if atomic.LoadInt32(&conn.resends) != 0 {
+	if atomic.LoadInt32(&conn.resends) > 0 {
 		atomic.AddInt32(&conn.resends, -1)
 	}
 	return nil
