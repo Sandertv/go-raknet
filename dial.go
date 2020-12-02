@@ -14,6 +14,11 @@ import (
 	"github.com/sandertv/go-raknet/internal/message"
 )
 
+// UpstreamDialer is an interface for anything compatible with net.Dialer.
+type UpstreamDialer interface {
+	Dial(network, address string) (net.Conn, error)
+}
+
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
 // Note that the packet sent to the server may be lost due to the nature of UDP. If this is the case, an error
@@ -82,8 +87,8 @@ type Dialer struct {
 	// simply discards the messages.
 	ErrorLog *log.Logger
 
-	// UpstreamDialer is a dialer that is used for opening udp connections.
-	UpstreamDialer net.Dialer
+	// UpstreamDialer is a dialer that will override the default dialer for opening outgoing connections.
+	UpstreamDialer UpstreamDialer
 }
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
@@ -116,7 +121,13 @@ func (dialer Dialer) PingTimeout(address string, timeout time.Duration) ([]byte,
 // PingContext could last indefinitely, hence a timeout should always be attached to the context passed.
 // PingContext cancels as soon as the deadline expires.
 func (dialer Dialer) PingContext(ctx context.Context, address string) (response []byte, err error) {
-	conn, err := dialer.UpstreamDialer.Dial("udp", address)
+	var conn net.Conn
+
+	if dialer.UpstreamDialer == nil {
+		conn, err = net.Dial("udp", address)
+	} else {
+		conn, err = dialer.UpstreamDialer.Dial("udp", address)
+	}
 	if err != nil {
 		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
@@ -191,7 +202,14 @@ func (dialer Dialer) DialTimeout(address string, timeout time.Duration) (*Conn, 
 // time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
 // closed.
 func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, error) {
-	udpConn, err := dialer.UpstreamDialer.Dial("udp", address)
+	var udpConn net.Conn
+	var err error
+
+	if dialer.UpstreamDialer == nil {
+		udpConn, err = net.Dial("udp", address)
+	} else {
+		udpConn, err = dialer.UpstreamDialer.Dial("udp", address)
+	}
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
