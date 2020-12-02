@@ -211,12 +211,12 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 	}
 
 	conn := newConn(listener.conn, addr, packet.ClientPreferredMTUSize)
+	conn.close = func() {
+		// Make sure to remove the connection from the Listener once the Conn is closed.
+		listener.connections.Delete(addr.String())
+	}
 	listener.connections.Store(addr.String(), conn)
 
-	go func() {
-		<-conn.closed
-		listener.connections.Delete(conn.addr.String())
-	}()
 	go func() {
 		t := time.NewTimer(time.Second * 10)
 		defer t.Stop()
