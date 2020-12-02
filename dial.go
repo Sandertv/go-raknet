@@ -14,7 +14,7 @@ import (
 	"github.com/sandertv/go-raknet/internal/message"
 )
 
-// UpstreamDialer is an interface for anything compatible with net.Dialer
+// UpstreamDialer is an interface for anything compatible with net.Dialer.
 type UpstreamDialer interface {
 	Dial(network, address string) (net.Conn, error)
 }
