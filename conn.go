@@ -16,13 +16,6 @@ const (
 	// currentProtocol is the current RakNet protocol version. This is Minecraft specific.
 	currentProtocol byte = 10
 
-	// resendRequestThreshold is the amount of datagrams that must be received before datagrams that were
-	// missing earlier will be requested to be resent.
-	resendRequestThreshold = 10
-	// tickInterval is the interval at which the connection sends an ACK containing the packets which were
-	// received or a NACK for missing packets.
-	tickInterval = time.Second / 10
-
 	maxMTUSize    = 1400
 	maxWindowSize = 1024
 )
@@ -124,7 +117,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 // startTicking makes the connection start ticking, sending ACKs and pings to the other end where necessary
 // and checking if the connection should be timed out.
 func (conn *Conn) startTicking() {
-	ticker := time.NewTicker(tickInterval)
+	ticker := time.NewTicker(time.Second / 10)
 	defer ticker.Stop()
 
 	var i int64
@@ -138,7 +131,7 @@ func (conn *Conn) startTicking() {
 				// timed out.
 				conn.sendPing()
 			}
-			if i%2 == 0 {
+			if i%3 == 0 {
 				conn.checkResend(t)
 			}
 		case <-conn.closed:
@@ -163,19 +156,19 @@ func (conn *Conn) flushACKs() {
 
 // checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
 // received and sends any packets that have been pending for too long.
-func (conn *Conn) checkResend(t time.Time) {
-	conn.mu.Lock()
+func (conn *Conn) checkResend(now time.Time) {
 	var resendSeqNums []uint24
 
+	conn.mu.Lock()
 	latency := conn.recoveryQueue.AvgDelay()
 	atomic.StoreUint32(&conn.latency, uint32(latency/2))
 
 	// Allow the average delay with a deviation of 200%.
-	delay := latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.resends)
-	for seqNum, timestamp := range conn.recoveryQueue.timestamps {
+	delay := latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.resends+1)
+	for seqNum, t := range conn.recoveryQueue.timestamps {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
-		if t.Sub(timestamp) > delay {
+		if now.Sub(t) > delay {
 			resendSeqNums = append(resendSeqNums, seqNum)
 		}
 	}
@@ -229,36 +222,36 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 
 		conn.buf.WriteByte(bitFlagDatagram)
 		writeUint24(conn.buf, sequenceNumber)
-		packet := packetPool.Get().(*packet)
-		if cap(packet.content) < len(content) {
-			packet.content = make([]byte, len(content))
+		pk := packetPool.Get().(*packet)
+		if cap(pk.content) < len(content) {
+			pk.content = make([]byte, len(content))
 		}
 		// We set the actual slice size to the same size as the content. It might be bigger than the previous
 		// size, in which case it will grow, which is fine as the underlying array will always be big enough.
-		packet.content = packet.content[:len(content)]
-		copy(packet.content, content)
+		pk.content = pk.content[:len(content)]
+		copy(pk.content, content)
 
-		packet.orderIndex = orderIndex
-		packet.messageIndex = messageIndex
+		pk.orderIndex = orderIndex
+		pk.messageIndex = messageIndex
 
-		packet.split = split
+		pk.split = split
 		if split {
-			// If there were more than one fragment, the packet was split, so we need to make sure we set the
+			// If there were more than one fragment, the pk was split, so we need to make sure we set the
 			// appropriate fields.
-			packet.splitCount = uint32(len(fragments))
-			packet.splitIndex = uint32(splitIndex)
-			packet.splitID = splitID
+			pk.splitCount = uint32(len(fragments))
+			pk.splitIndex = uint32(splitIndex)
+			pk.splitID = splitID
 		}
-		packet.write(conn.buf)
-		// We then send the packet to the connection.
+		pk.write(conn.buf)
+		// We then send the pk to the connection.
 		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.addr); err != nil {
 			return 0, errClosed
 		}
-		// We reset the buffer so that we can re-use it for each fragment created when splitting the packet.
+		// We reset the buffer so that we can re-use it for each fragment created when splitting the pk.
 		conn.buf.Reset()
 
-		// Finally we add the packet to the recovery queue.
-		conn.recoveryQueue.put(sequenceNumber, packet)
+		// Finally we add the pk to the recovery queue.
+		conn.recoveryQueue.put(sequenceNumber, pk)
 		n += len(content)
 	}
 	return
@@ -270,11 +263,11 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 // times out, in which case an error is returned.
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
-	case packet := <-conn.packets:
-		if len(b) < packet.Len() {
+	case pk := <-conn.packets:
+		if len(b) < pk.Len() {
 			err = conn.wrap(errBufferTooSmall, "read")
 		}
-		return copy(b, packet.Bytes()), err
+		return copy(b, pk.Bytes()), err
 	case <-conn.closed:
 		return 0, conn.wrap(errClosed, "read")
 	case <-conn.readDeadline:
@@ -450,7 +443,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
 		// increment the dialerID, and if it exceeds the threshold we send a NACK to request again.
 		conn.missingDatagramTimes++
-		if conn.missingDatagramTimes >= resendRequestThreshold {
+		if conn.missingDatagramTimes >= 10 {
 			if err := conn.sendNACK(conn.datagramQueue.missing()); err != nil {
 				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
