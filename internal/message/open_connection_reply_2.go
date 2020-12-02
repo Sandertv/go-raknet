@@ -10,7 +10,7 @@ type OpenConnectionReply2 struct {
 	Magic         [16]byte
 	ServerGUID    int64
 	ClientAddress net.UDPAddr
-	MTUSize       int16
+	MTUSize       uint16
 	Secure        bool
 }
 

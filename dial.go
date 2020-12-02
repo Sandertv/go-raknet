@@ -221,7 +221,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		return nil, timeout(ctx)
 	}
 
-	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), int16(atomic.LoadUint32(&state.mtuSize)))
+	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), uint16(atomic.LoadUint32(&state.mtuSize)))
 	conn.close = func() {
 		// We have to make the Conn call this method explicitly because it must not close the connection
 		// established by the Listener. (This would close the entire listener.)
@@ -292,7 +292,7 @@ type connState struct {
 
 	// discoveringMTUSize is the current MTU size 'discovered'. This MTU size decreases the more the open
 	// connection request 1 is sent, so that the max packet size can be discovered.
-	discoveringMTUSize int16
+	discoveringMTUSize uint16
 }
 
 // openConnectionRequest sends open connection request 2 packets continuously until it receives an open
@@ -312,7 +312,7 @@ func (state *connState) openConnectionRequest(ctx context.Context) (e error) {
 		for {
 			select {
 			case <-c:
-				if err := state.sendOpenConnectionRequest2(int16(atomic.LoadUint32(&state.mtuSize))); err != nil {
+				if err := state.sendOpenConnectionRequest2(uint16(atomic.LoadUint32(&state.mtuSize))); err != nil {
 					e = err
 					return
 				}
@@ -358,7 +358,7 @@ func (state *connState) openConnectionRequest(ctx context.Context) (e error) {
 func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
-	var staticMTU int16
+	var staticMTU uint16
 
 	stop := make(chan struct{})
 	defer func() {
@@ -434,7 +434,7 @@ func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 
 // sendOpenConnectionRequest2 sends an open connection request 2 packet to the server. If not successful, an
 // error is returned.
-func (state *connState) sendOpenConnectionRequest2(mtu int16) error {
+func (state *connState) sendOpenConnectionRequest2(mtu uint16) error {
 	b := bytes.NewBuffer(nil)
 	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), ClientPreferredMTUSize: mtu, ClientGUID: state.id}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
@@ -443,7 +443,7 @@ func (state *connState) sendOpenConnectionRequest2(mtu int16) error {
 
 // sendOpenConnectionRequest1 sends an open connection request 1 packet to the server. If not successful, an
 // error is returned.
-func (state *connState) sendOpenConnectionRequest1(mtu int16) error {
+func (state *connState) sendOpenConnectionRequest1(mtu uint16) error {
 	b := bytes.NewBuffer(nil)
 	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MaximumSizeNotDropped: mtu}).Write(b)
 	_, err := state.conn.Write(b.Bytes())

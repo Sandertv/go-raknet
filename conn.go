@@ -59,7 +59,7 @@ type Conn struct {
 
 	// mtuSize is the MTU size of the connection. Packets longer than this size must be split into fragments
 	// for them to arrive at the client without losing bytes.
-	mtuSize int16
+	mtuSize uint16
 
 	// latency is the last measured latency between both ends of the connection. Note that this latency is
 	// not the round-trip time, but half of that. The latency is measured in nanoseconds.
@@ -97,7 +97,7 @@ type Conn struct {
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
-func newConn(conn net.PacketConn, addr net.Addr, mtuSize int16) *Conn {
+func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 	if mtuSize < 500 || mtuSize > 1500 {
 		mtuSize = maxMTUSize
 	}

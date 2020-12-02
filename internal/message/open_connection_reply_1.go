@@ -9,7 +9,7 @@ type OpenConnectionReply1 struct {
 	Magic                  [16]byte
 	ServerGUID             int64
 	Secure                 bool
-	ServerPreferredMTUSize int16
+	ServerPreferredMTUSize uint16
 }
 
 func (pk *OpenConnectionReply1) Write(buf *bytes.Buffer) {

@@ -9,7 +9,7 @@ import (
 type OpenConnectionRequest2 struct {
 	Magic                  [16]byte
 	ServerAddress          net.UDPAddr
-	ClientPreferredMTUSize int16
+	ClientPreferredMTUSize uint16
 	ClientGUID             int64
 }
 
