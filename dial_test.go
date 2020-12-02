@@ -38,7 +38,7 @@ func TestPingWithCustomDialer(t *testing.T) {
 	}
 
 	dialer := raknet.Dialer{
-		UpstreamDialer: net.Dialer{
+		UpstreamDialer: &net.Dialer{
 			LocalAddr: localDialAddr,
 		},
 	}
@@ -80,7 +80,7 @@ func TestDialWithCustomDialer(t *testing.T) {
 	}
 
 	dialer := raknet.Dialer{
-		UpstreamDialer: net.Dialer{
+		UpstreamDialer: &net.Dialer{
 			LocalAddr: localDialAddr,
 		},
 	}
