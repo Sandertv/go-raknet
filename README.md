@@ -59,9 +59,6 @@ func main() {
 }
 ```
 
-For an example on how to apply these and other methods in order to create a proxy, see the examples/proxy
-folder.
-
 ### Documentation
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/sandertv/go-raknet)](https://pkg.go.dev/github.com/sandertv/go-raknet)
 
