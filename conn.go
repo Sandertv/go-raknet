@@ -123,6 +123,7 @@ func (conn *Conn) startTicking() {
 	defer ticker.Stop()
 
 	var i int64
+	var acksLeft int
 	for {
 		select {
 		case t := <-ticker.C:
@@ -137,10 +138,16 @@ func (conn *Conn) startTicking() {
 				conn.checkResend(t)
 			}
 			if unix := atomic.LoadInt64(&conn.closing); unix != 0 {
+				before := acksLeft
 				conn.mu.Lock()
-				acksLeft := len(conn.recoveryQueue.timestamps)
+				acksLeft = len(conn.recoveryQueue.timestamps)
 				conn.mu.Unlock()
-				if acksLeft == 0 || time.Since(time.Unix(unix, 0)) > time.Second*7 {
+				if before != 0 && acksLeft == 0 {
+					atomic.StoreInt64(&conn.closing, time.Now().Unix())
+				}
+
+				since := time.Since(time.Unix(unix, 0))
+				if (acksLeft == 0 && since > time.Second) || since > time.Second*8 {
 					conn.closeImmediately()
 				}
 			}
