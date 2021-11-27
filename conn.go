@@ -38,6 +38,8 @@ type Conn struct {
 
 	once              sync.Once
 	closed, connected chan struct{}
+	closeOnce         sync.Once
+	closing           int64
 	close             func()
 
 	mu  sync.Mutex
@@ -133,6 +135,14 @@ func (conn *Conn) startTicking() {
 			}
 			if i%3 == 0 {
 				conn.checkResend(t)
+			}
+			if unix := atomic.LoadInt64(&conn.closing); unix != 0 {
+				conn.mu.Lock()
+				acksLeft := len(conn.recoveryQueue.timestamps)
+				conn.mu.Unlock()
+				if acksLeft == 0 || time.Since(time.Unix(unix, 0)) > time.Second*7 {
+					conn.closeImmediately()
+				}
 			}
 		case <-conn.closed:
 			return
@@ -289,9 +299,19 @@ func (conn *Conn) ReadPacket() (b []byte, err error) {
 	}
 }
 
-// Close closes the connection. All blocking Read or Write actions are cancelled and will return an error.
+// Close closes the connection. All blocking Read or Write actions are cancelled and will return an error, as
+// soon as the closing of the connection is acknowledged by the client.
 func (conn *Conn) Close() error {
 	conn.once.Do(func() {
+		atomic.StoreInt64(&conn.closing, time.Now().Unix())
+	})
+	return nil
+}
+
+// closeImmediately sends a Disconnect notification to the other end of the connection and
+// closes the underlying UDP connection immediately.
+func (conn *Conn) closeImmediately() {
+	conn.closeOnce.Do(func() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
 		close(conn.closed)
 		if conn.close != nil {
@@ -299,7 +319,6 @@ func (conn *Conn) Close() error {
 			conn.close = nil
 		}
 	})
-	return nil
 }
 
 // RemoteAddr returns the remote address of the connection, meaning the address this connection leads to.
@@ -520,7 +539,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 	case message.IDConnectedPong:
 		return conn.handleConnectedPong(buffer)
 	case message.IDDisconnectNotification:
-		return conn.Close()
+		conn.closeImmediately()
 	case message.IDDetectLostConnections:
 		// Let the other end know the connection is still alive.
 		conn.sendPing()
