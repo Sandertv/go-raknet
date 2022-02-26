@@ -160,6 +160,8 @@ func (conn *Conn) startTicking() {
 // flushACKs flushes all pending datagram acknowledgements.
 func (conn *Conn) flushACKs() {
 	conn.datagramsRecvMu.Lock()
+	defer conn.datagramsRecvMu.Unlock()
+
 	if len(conn.datagramsReceived) > 0 {
 		// Write an ACK packet to the connection containing all datagram sequence numbers that we
 		// received since the last tick.
@@ -168,7 +170,6 @@ func (conn *Conn) flushACKs() {
 		}
 		conn.datagramsReceived = conn.datagramsReceived[:0]
 	}
-	conn.datagramsRecvMu.Unlock()
 }
 
 // checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
@@ -695,7 +696,7 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 		}
 		buf.WriteByte(bitflag | bitFlagDatagram)
 		if err := ack.write(buf); err != nil {
-			return fmt.Errorf("error encoding ACK packet: %v", err)
+			panic(fmt.Sprintf("error encoding ACK packet: %v", err))
 		}
 		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.addr); err != nil {
 			return fmt.Errorf("error sending ACK packet: %v", err)
