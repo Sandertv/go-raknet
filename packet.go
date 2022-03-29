@@ -184,10 +184,10 @@ type acknowledgement struct {
 }
 
 // write writes an acknowledgement packet and returns an error if not successful.
-func (ack *acknowledgement) write(b *bytes.Buffer) error {
+func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error) {
 	packets := ack.packets
 	if len(packets) == 0 {
-		return binary.Write(b, binary.BigEndian, int16(0))
+		return 0, binary.Write(b, binary.BigEndian, int16(0))
 	}
 	buffer := bytes.NewBuffer(nil)
 	// Sort packets before encoding to ensure packets are encoded correctly.
@@ -200,6 +200,11 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 	var recordCount int16
 
 	for index, packet := range packets {
+		if buffer.Len() >= int(mtu-10) {
+			// We must make sure the final packet length doesn't exceed the MTU size.
+			break
+		}
+		n++
 		if index == 0 {
 			// The first packet, set the first and last packet to it.
 			firstPacketInRange = packet
@@ -217,7 +222,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 				// First packet equals last packet, so we have a single packet record. Write down the packet,
 				// and set the first and last packet to the current packet.
 				if err := buffer.WriteByte(packetSingle); err != nil {
-					return err
+					return 0, err
 				}
 				writeUint24(buffer, firstPacketInRange)
 
@@ -227,7 +232,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 				// There's a gap between the first and last packet, so we have a range of packets. Write the
 				// first and last packet of the range and set both to the current packet.
 				if err := buffer.WriteByte(packetRange); err != nil {
-					return err
+					return 0, err
 				}
 				writeUint24(buffer, firstPacketInRange)
 				writeUint24(buffer, lastPacketInRange)
@@ -244,24 +249,24 @@ func (ack *acknowledgement) write(b *bytes.Buffer) error {
 	// how we should write the current.
 	if firstPacketInRange == lastPacketInRange {
 		if err := buffer.WriteByte(packetSingle); err != nil {
-			return err
+			return 0, err
 		}
 		writeUint24(buffer, firstPacketInRange)
 	} else {
 		if err := buffer.WriteByte(packetRange); err != nil {
-			return err
+			return 0, err
 		}
 		writeUint24(buffer, firstPacketInRange)
 		writeUint24(buffer, lastPacketInRange)
 	}
 	recordCount++
 	if err := binary.Write(b, binary.BigEndian, recordCount); err != nil {
-		return err
+		return 0, err
 	}
 	if _, err := b.Write(buffer.Bytes()); err != nil {
-		return err
+		return 0, err
 	}
-	return nil
+	return n, nil
 }
 
 // read reads an acknowledgement packet and returns an error if not successful.

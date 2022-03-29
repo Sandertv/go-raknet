@@ -630,7 +630,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // An error is returned if the packet was not valid.
 func (conn *Conn) handleSplitPacket(p *packet) error {
 	const maxSplitCount = 256
-	if p.splitCount > maxSplitCount || len(conn.splits) > 16 {
+	if p.splitCount > maxSplitCount || len(conn.splits) > 64 {
 		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
 	}
 	m, ok := conn.splits[p.splitID]
@@ -683,28 +683,22 @@ func (conn *Conn) sendNACK(packets []uint24) error {
 // sendAcknowledgement sends an acknowledgement packet with the packets passed, potentially sending multiple
 // if too many packets are passed. The bitflag is added to the header byte.
 func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes.Buffer) error {
-	ack := &acknowledgement{}
+	ack := &acknowledgement{packets: packets}
 
-	for {
-		ack.packets = packets
-		// Split acknowledgement packets with more than 4096 packets in them.
-		if len(ack.packets) > 4096 {
-			ack.packets = packets[:4096]
-			packets = packets[4096:]
-		} else {
-			packets = packets[:0]
-		}
+	for len(ack.packets) != 0 {
 		buf.WriteByte(bitflag | bitFlagDatagram)
-		if err := ack.write(buf); err != nil {
+		n, err := ack.write(buf, conn.mtuSize)
+		if err != nil {
 			panic(fmt.Sprintf("error encoding ACK packet: %v", err))
 		}
+		// We managed to write n packets in the ACK with this MTU size, write the next of the packets in a new ACK.
+		ack.packets = ack.packets[n:]
 		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.addr); err != nil {
 			return fmt.Errorf("error sending ACK packet: %v", err)
 		}
-		if len(packets) == 0 {
-			return nil
-		}
+		buf.Reset()
 	}
+	return nil
 }
 
 // handleACK handles an acknowledgement packet from the other end of the connection. These mean that a
