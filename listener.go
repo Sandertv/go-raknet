@@ -187,7 +187,11 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		// Connection was closed already.
 		return nil
 	default:
-		return value.(*Conn).receive(b)
+		err := conn.receive(b)
+		if err != nil {
+			_ = conn.Close()
+		}
+		return err
 	}
 }
 

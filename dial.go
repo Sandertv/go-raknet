@@ -292,6 +292,7 @@ func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 		buf.Write(b[:n])
 		if err := rakConn.receive(buf); err != nil {
 			errorLog.Printf("error handling packet: %v\n", err)
+			_ = rakConn.Close()
 		}
 		buf.Reset()
 	}

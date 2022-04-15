@@ -17,7 +17,7 @@ const (
 	currentProtocol byte = 10
 
 	maxMTUSize    = 1400
-	maxWindowSize = 1024
+	maxWindowSize = 2048
 )
 
 // ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
@@ -462,7 +462,10 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 
 	lowestBefore := conn.datagramQueue.lowest
 	if !conn.datagramQueue.put(sequenceNumber) {
-		return fmt.Errorf("error handing datagram: datagram already received")
+		// Datagram was already received, this might happen if a packet took a long time to arrive, and we already sent
+		// a NACK for it. This is expected to happen sometimes under normal circumstances, so no reason to return an
+		// error.
+		return nil
 	}
 	conn.datagramQueue.clear()
 
