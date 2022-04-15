@@ -88,7 +88,7 @@ type Conn struct {
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
 
-	resends int32
+	resends, nacks int32
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -111,6 +111,8 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 		buf:           bytes.NewBuffer(make([]byte, 0, mtuSize)),
 		ackBuf:        bytes.NewBuffer(make([]byte, 0, 256)),
 		nackBuf:       bytes.NewBuffer(make([]byte, 0, 256)),
+		nacks:         15,
+		resends:       15,
 	}
 	go c.startTicking()
 	return c
@@ -460,7 +462,6 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	conn.datagramsReceived = append(conn.datagramsReceived, sequenceNumber)
 	conn.datagramsRecvMu.Unlock()
 
-	lowestBefore := conn.datagramQueue.lowest
 	if !conn.datagramQueue.put(sequenceNumber) {
 		// Datagram was already received, this might happen if a packet took a long time to arrive, and we already sent
 		// a NACK for it. This is expected to happen sometimes under normal circumstances, so no reason to return an
@@ -469,19 +470,30 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 	}
 	conn.datagramQueue.clear()
 
-	if conn.datagramQueue.lowest == lowestBefore {
-		// We couldn't take any datagram out of the receive queue, meaning we are missing a datagram. We
-		// increment the dialerID, and if it exceeds the threshold we send a NACK to request again.
-		conn.missingDatagramTimes++
-		if conn.missingDatagramTimes >= 10 {
-			if err := conn.sendNACK(conn.datagramQueue.missing()); err != nil {
+	var (
+		missing []uint24
+		latency = conn.Latency()
+		maxDur  = latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.nacks+1)
+	)
+	allPresent := len(conn.datagramQueue.queue) == 0
+	for seq, t := range conn.datagramQueue.queue {
+		if time.Since(t) > maxDur {
+			missing = append(missing, conn.datagramQueue.missing(seq)...)
+		}
+	}
+	conn.datagramQueue.clear()
+	if !allPresent {
+		atomic.AddInt32(&conn.nacks, 1)
+
+		if len(missing) > 0 {
+			if err := conn.sendNACK(missing); err != nil {
 				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
-			conn.missingDatagramTimes = 0
 		}
 	} else {
-		conn.missingDatagramTimes = 0
+		atomic.AddInt32(&conn.nacks, -1)
 	}
+
 	if conn.datagramQueue.WindowSize() > maxWindowSize {
 		return fmt.Errorf("datagram receive queue window size is too big")
 	}
@@ -633,7 +645,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // An error is returned if the packet was not valid.
 func (conn *Conn) handleSplitPacket(p *packet) error {
 	const maxSplitCount = 256
-	if p.splitCount > maxSplitCount || len(conn.splits) > 64 {
+	if p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount {
 		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
 	}
 	m, ok := conn.splits[p.splitID]
@@ -714,7 +726,6 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	if err := ack.read(b); err != nil {
 		return fmt.Errorf("error reading ACK: %v", err)
 	}
-	success := int32(0)
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
 		p, ok := conn.recoveryQueue.take(sequenceNumber)
@@ -722,7 +733,6 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 			// Clear the packet and return it to the pool so that it may be re-used.
 			p.content = nil
 			packetPool.Put(p)
-			success++
 		}
 	}
 	if atomic.LoadInt32(&conn.resends) > 0 {
