@@ -20,6 +20,10 @@ const (
 	maxWindowSize = 2048
 )
 
+func init() {
+	fmt.Println("Version up to date.")
+}
+
 // ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
 // connection was closed.
 func ErrConnectionClosed(err error) bool {
