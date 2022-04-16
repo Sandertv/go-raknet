@@ -183,7 +183,7 @@ type acknowledgement struct {
 	packets []uint24
 }
 
-// write writes an acknowledgement packet and returns an error if not successful.
+// write encodes an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error) {
 	packets := ack.packets
 	if len(packets) == 0 {
@@ -269,7 +269,7 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 	return n, nil
 }
 
-// read reads an acknowledgement packet and returns an error if not successful.
+// read decodes an acknowledgement packet and returns an error if not successful.
 func (ack *acknowledgement) read(b *bytes.Buffer) error {
 	const maxAcknowledgementPackets = 8192
 	var recordCount int16

@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/df-mc/atomic"
 	"github.com/sandertv/go-raknet/internal/message"
 	"net"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -20,19 +19,6 @@ const (
 	maxWindowSize = 2048
 )
 
-func init() {
-	fmt.Println("Version up to date.")
-}
-
-// ErrConnectionClosed checks if the error passed was an error caused by reading from a Conn of which the
-// connection was closed.
-func ErrConnectionClosed(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), errClosed.Error())
-}
-
 // Conn represents a connection to a specific client. It is not a real connection, as UDP is connectionless,
 // but rather a connection emulated using RakNet.
 // Methods may be called on Conn from multiple goroutines simultaneously.
@@ -42,8 +28,7 @@ type Conn struct {
 
 	once              sync.Once
 	closed, connected chan struct{}
-	closeOnce         sync.Once
-	closing           int64
+	closing           atomic.Int64
 	close             func()
 
 	mu  sync.Mutex
@@ -60,22 +45,22 @@ type Conn struct {
 	// for them to arrive at the client without losing bytes.
 	mtuSize uint16
 
-	// latency is the last measured latency between both ends of the connection. Note that this latency is
-	// not the round-trip time, but half of that. The latency is measured in nanoseconds.
-	latency uint32
+	// rtt is the last measured round-trip time between both ends of the connection. The rtt is measured in nanoseconds.
+	rtt atomic.Int64
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
 	splits map[uint16][][]byte
 
-	// datagramQueue is an ordered queue used to track which datagrams were received and which datagrams
+	// win is an ordered queue used to track which datagrams were received and which datagrams
 	// were missing, so that we can send NACKs to request missing datagrams.
-	datagramQueue *datagramQueue
+	win *datagramWindow
 
-	datagramsRecvMu sync.Mutex
-	// datagramsReceived is a slice containing sequence numbers of datagrams that were received over the last
-	// 3 seconds. When ticked, all of these packets are sent in an ACK and the slice is cleared.
-	datagramsReceived []uint24
+	ackMu sync.Mutex
+	// ackSlice is a slice containing sequence numbers of datagrams that were received over the last
+	// second. When ticked, all of these packets are sent in an ACK and the slice is cleared.
+	ackSlice []uint24
+
 	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
 	missingDatagramTimes int
 
@@ -85,14 +70,14 @@ type Conn struct {
 	// consumes a value from this channel.
 	packets chan *bytes.Buffer
 
-	// recoveryQueue is a queue filled with packets that were sent with a given datagram sequence number.
-	recoveryQueue *recoveryQueue
+	// retransmission is a queue filled with packets that were sent with a given datagram sequence number.
+	retransmission *resendMap
 
 	// readDeadline is a channel that receives a time.Time after a specific time. It is used to listen for
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
 
-	resends, nacks int32
+	resends int32
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -101,22 +86,20 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 		mtuSize = maxMTUSize
 	}
 	c := &Conn{
-		addr:          addr,
-		conn:          conn,
-		mtuSize:       mtuSize,
-		pk:            new(packet),
-		closed:        make(chan struct{}),
-		connected:     make(chan struct{}),
-		packets:       make(chan *bytes.Buffer, 512),
-		splits:        make(map[uint16][][]byte),
-		datagramQueue: newDatagramQueue(),
-		packetQueue:   newPacketQueue(),
-		recoveryQueue: newRecoveryQueue(),
-		buf:           bytes.NewBuffer(make([]byte, 0, mtuSize)),
-		ackBuf:        bytes.NewBuffer(make([]byte, 0, 256)),
-		nackBuf:       bytes.NewBuffer(make([]byte, 0, 256)),
-		nacks:         15,
-		resends:       15,
+		addr:           addr,
+		conn:           conn,
+		mtuSize:        mtuSize,
+		pk:             new(packet),
+		closed:         make(chan struct{}),
+		connected:      make(chan struct{}),
+		packets:        make(chan *bytes.Buffer, 512),
+		splits:         make(map[uint16][][]byte),
+		win:            newDatagramWindow(),
+		packetQueue:    newPacketQueue(),
+		retransmission: newRecoveryQueue(),
+		buf:            bytes.NewBuffer(make([]byte, 0, mtuSize)),
+		ackBuf:         bytes.NewBuffer(make([]byte, 0, 256)),
+		nackBuf:        bytes.NewBuffer(make([]byte, 0, 256)),
 	}
 	go c.startTicking()
 	return c
@@ -125,31 +108,34 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 // startTicking makes the connection start ticking, sending ACKs and pings to the other end where necessary
 // and checking if the connection should be timed out.
 func (conn *Conn) startTicking() {
-	ticker := time.NewTicker(time.Second / 10)
+	var (
+		interval = time.Second / 10
+		ticker   = time.NewTicker(interval)
+		i        int64
+		acksLeft int
+	)
 	defer ticker.Stop()
-
-	var i int64
-	var acksLeft int
 	for {
 		select {
 		case t := <-ticker.C:
 			i++
 			conn.flushACKs()
-			if i%40 == 0 {
-				// We send a connected ping to calculate the latency and let the other side know we haven't
+			if i%2 == 0 {
+				// We send a connected ping to calculate the rtt and let the other side know we haven't
 				// timed out.
 				conn.sendPing()
 			}
 			if i%3 == 0 {
 				conn.checkResend(t)
 			}
-			if unix := atomic.LoadInt64(&conn.closing); unix != 0 {
+			if unix := conn.closing.Load(); unix != 0 {
 				before := acksLeft
 				conn.mu.Lock()
-				acksLeft = len(conn.recoveryQueue.timestamps)
+				acksLeft = len(conn.retransmission.unacknowledged)
 				conn.mu.Unlock()
+
 				if before != 0 && acksLeft == 0 {
-					atomic.StoreInt64(&conn.closing, time.Now().Unix())
+					_ = conn.Close()
 				}
 
 				since := time.Since(time.Unix(unix, 0))
@@ -165,45 +151,43 @@ func (conn *Conn) startTicking() {
 
 // flushACKs flushes all pending datagram acknowledgements.
 func (conn *Conn) flushACKs() {
-	conn.datagramsRecvMu.Lock()
-	defer conn.datagramsRecvMu.Unlock()
+	conn.ackMu.Lock()
+	defer conn.ackMu.Unlock()
 
-	if len(conn.datagramsReceived) > 0 {
+	if len(conn.ackSlice) > 0 {
 		// Write an ACK packet to the connection containing all datagram sequence numbers that we
 		// received since the last tick.
-		if err := conn.sendACK(conn.datagramsReceived...); err != nil {
+		if err := conn.sendACK(conn.ackSlice...); err != nil {
 			return
 		}
-		conn.datagramsReceived = conn.datagramsReceived[:0]
+		conn.ackSlice = conn.ackSlice[:0]
 	}
 }
 
 // checkResend checks if the connection needs to resend any packets. It sends an ACK for packets it has
 // received and sends any packets that have been pending for too long.
 func (conn *Conn) checkResend(now time.Time) {
-	var resendSeqNums []uint24
-
 	conn.mu.Lock()
-	latency := conn.recoveryQueue.AvgDelay()
-	atomic.StoreUint32(&conn.latency, uint32(latency/2))
+	defer conn.mu.Unlock()
 
-	// Allow the average delay with a deviation of 200%.
-	delay := latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.resends+1)
-	for seqNum, t := range conn.recoveryQueue.timestamps {
+	var (
+		resend []uint24
+		rtt    = conn.retransmission.rtt()
+		delay  = rtt + rtt/2
+	)
+	conn.rtt.Store(int64(rtt))
+
+	for seq, t := range conn.retransmission.unacknowledged {
 		// These packets have not been acknowledged for too long: We resend them by ourselves, even though no
 		// NACK has been issued yet.
-		if now.Sub(t) > delay {
-			resendSeqNums = append(resendSeqNums, seqNum)
+		if now.Sub(t.timestamp) > delay {
+			resend = append(resend, seq)
 		}
 	}
-	l := len(resendSeqNums)
-	_ = conn.resend(resendSeqNums)
-	conn.mu.Unlock()
+	_ = conn.resend(resend)
 
-	if l != 0 {
-		atomic.AddInt32(&conn.resends, 1)
-		if atomic.LoadInt32(&conn.resends) > 30 {
-			// Too many packets not acknowledged in time, the connection was probably closed.
+	if len(resend) != 0 {
+		if conn.resends++; conn.resends > 50 {
 			_ = conn.Close()
 		}
 	}
@@ -215,7 +199,7 @@ func (conn *Conn) checkResend(now time.Time) {
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	select {
 	case <-conn.closed:
-		return 0, conn.wrap(errClosed, "write")
+		return 0, conn.wrap(net.ErrClosed, "write")
 	default:
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
@@ -269,13 +253,14 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		pk.write(conn.buf)
 		// We then send the pk to the connection.
 		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.addr); err != nil {
-			return 0, errClosed
+			return 0, net.ErrClosed
 		}
+
 		// We reset the buffer so that we can re-use it for each fragment created when splitting the pk.
 		conn.buf.Reset()
 
 		// Finally we add the pk to the recovery queue.
-		conn.recoveryQueue.put(sequenceNumber, pk)
+		conn.retransmission.add(sequenceNumber, pk)
 		n += len(content)
 	}
 	return
@@ -293,7 +278,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 		}
 		return copy(b, pk.Bytes()), err
 	case <-conn.closed:
-		return 0, conn.wrap(errClosed, "read")
+		return 0, conn.wrap(net.ErrClosed, "read")
 	case <-conn.readDeadline:
 		return 0, conn.wrap(context.DeadlineExceeded, "read")
 	}
@@ -307,7 +292,7 @@ func (conn *Conn) ReadPacket() (b []byte, err error) {
 	case packet := <-conn.packets:
 		return packet.Bytes(), err
 	case <-conn.closed:
-		return nil, conn.wrap(errClosed, "read")
+		return nil, conn.wrap(net.ErrClosed, "read")
 	case <-conn.readDeadline:
 		return nil, conn.wrap(context.DeadlineExceeded, "read")
 	}
@@ -316,16 +301,14 @@ func (conn *Conn) ReadPacket() (b []byte, err error) {
 // Close closes the connection. All blocking Read or Write actions are cancelled and will return an error, as
 // soon as the closing of the connection is acknowledged by the client.
 func (conn *Conn) Close() error {
-	conn.once.Do(func() {
-		atomic.StoreInt64(&conn.closing, time.Now().Unix())
-	})
+	conn.closing.CAS(0, time.Now().Unix())
 	return nil
 }
 
 // closeImmediately sends a Disconnect notification to the other end of the connection and
 // closes the underlying UDP connection immediately.
 func (conn *Conn) closeImmediately() {
-	conn.closeOnce.Do(func() {
+	conn.once.Do(func() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
 		close(conn.closed)
 		if conn.close != nil {
@@ -372,13 +355,13 @@ func (conn *Conn) SetDeadline(t time.Time) error {
 	return conn.SetReadDeadline(t)
 }
 
-// Latency returns a rolling average of latency between the sending and the receiving end of the connection.
-// The latency returned is updated continuously and is half the round trip time (RTT).
+// Latency returns a rolling average of rtt between the sending and the receiving end of the connection.
+// The rtt returned is updated continuously and is half the average round trip time (RTT).
 func (conn *Conn) Latency() time.Duration {
-	return time.Duration(atomic.LoadUint32(&conn.latency))
+	return time.Duration(conn.rtt.Load() / 2)
 }
 
-// sendPing pings the connection, updating the latency of the Conn if successful.
+// sendPing pings the connection, updating the rtt of the Conn if successful.
 func (conn *Conn) sendPing() {
 	b := bytes.NewBuffer(nil)
 	(&message.ConnectedPing{ClientTimestamp: timestamp()}).Write(b)
@@ -455,65 +438,51 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 }
 
 // receiveDatagram handles the receiving of a datagram found in buffer b. If successful, all packets inside
-// of the datagram are handled. if not, an error is returned.
+// the datagram are handled. if not, an error is returned.
 func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
-	sequenceNumber, err := readUint24(b)
+	seq, err := readUint24(b)
 	if err != nil {
 		return fmt.Errorf("error reading datagram sequence number: %v", err)
 	}
-	conn.datagramsRecvMu.Lock()
-	// Add this sequence number to the received datagrams so we ACK it.
-	conn.datagramsReceived = append(conn.datagramsReceived, sequenceNumber)
-	conn.datagramsRecvMu.Unlock()
+	conn.ackMu.Lock()
+	// Add this sequence number to the received datagrams, so that it is included in an ACK.
+	conn.ackSlice = append(conn.ackSlice, seq)
+	conn.ackMu.Unlock()
 
-	if !conn.datagramQueue.put(sequenceNumber) {
+	if !conn.win.new(seq) {
 		// Datagram was already received, this might happen if a packet took a long time to arrive, and we already sent
 		// a NACK for it. This is expected to happen sometimes under normal circumstances, so no reason to return an
 		// error.
 		return nil
 	}
-	conn.datagramQueue.clear()
-
-	var (
-		missing []uint24
-		latency = conn.Latency()
-		maxDur  = latency*3 + (latency/2+time.Millisecond*50)*time.Duration(conn.nacks+1)
-	)
-	allPresent := len(conn.datagramQueue.queue) == 0
-	for seq, t := range conn.datagramQueue.queue {
-		if time.Since(t) > maxDur {
-			missing = append(missing, conn.datagramQueue.missing(seq)...)
-		}
-	}
-	conn.datagramQueue.clear()
-	if !allPresent {
-		atomic.AddInt32(&conn.nacks, 1)
-
-		if len(missing) > 0 {
-			if err := conn.sendNACK(missing); err != nil {
+	conn.win.add(seq)
+	if conn.win.shift() == 0 {
+		// Datagram window couldn't be shifted up, so we're still missing packets.
+		rtt := time.Duration(conn.rtt.Load())
+		if missing := conn.win.missing(rtt + rtt/2); len(missing) > 0 {
+			if err = conn.sendNACK(missing); err != nil {
 				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
 			}
 		}
-	} else {
-		atomic.AddInt32(&conn.nacks, -1)
 	}
-
-	if conn.datagramQueue.WindowSize() > maxWindowSize {
-		return fmt.Errorf("datagram receive queue window size is too big")
+	if conn.win.size() > maxWindowSize {
+		return fmt.Errorf("datagram receive queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
+	return conn.handleDatagram(b)
+}
 
+// handleDatagram handles the contents of a datagram encoded in a bytes.Buffer.
+func (conn *Conn) handleDatagram(b *bytes.Buffer) error {
 	for b.Len() > 0 {
 		if err := conn.pk.read(b); err != nil {
 			return fmt.Errorf("error decoding datagram packet: %v", err)
 		}
+		handle := conn.receivePacket
 		if conn.pk.split {
-			if err := conn.handleSplitPacket(conn.pk); err != nil {
-				return fmt.Errorf("error receiving split packet: %v", err)
-			}
-			continue
+			handle = conn.receiveSplitPacket
 		}
-		if err := conn.receivePacket(conn.pk); err != nil {
-			return fmt.Errorf("error receiving packet: %v", err)
+		if err := handle(conn.pk); err != nil {
+			return fmt.Errorf("error handling packet in datagram: %v", err)
 		}
 	}
 	return nil
@@ -531,7 +500,7 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		return nil
 	}
 	if conn.packetQueue.WindowSize() > maxWindowSize {
-		return fmt.Errorf("packet queue window size is too big")
+		return fmt.Errorf("packet queue window size is too big (%v-%v)", conn.packetQueue.lowest, conn.packetQueue.highest)
 	}
 	for _, content := range conn.packetQueue.fetch() {
 		if err := conn.handlePacket(content); err != nil {
@@ -606,9 +575,9 @@ func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
 		return fmt.Errorf("error reading connected pong: %v", err)
 	}
 	if packet.ClientTimestamp > timestamp() {
-		return fmt.Errorf("error measuring latency: ping timestamp is in the future")
+		return fmt.Errorf("error measuring rtt: ping timestamp is in the future")
 	}
-	// We don't actually use the ConnectedPong to measure latency. It is too unreliable and doesn't give a
+	// We don't actually use the ConnectedPong to measure rtt. It is too unreliable and doesn't give a
 	// good idea of the connection quality.
 	return nil
 }
@@ -644,10 +613,10 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 	return err
 }
 
-// handleSplitPacket handles a passed split packet. If it is the last split packet of its sequence, it will
+// receiveSplitPacket handles a passed split packet. If it is the last split packet of its sequence, it will
 // continue handling the full packet as it otherwise would.
 // An error is returned if the packet was not valid.
-func (conn *Conn) handleSplitPacket(p *packet) error {
+func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 256
 	if p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount {
 		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
@@ -667,7 +636,7 @@ func (conn *Conn) handleSplitPacket(p *packet) error {
 	size := 0
 	for _, fragment := range m {
 		if len(fragment) == 0 {
-			// We haven't yet received all split fragments, so we cannot put the packets together yet.
+			// We haven't yet received all split fragments, so we cannot add the packets together yet.
 			return nil
 		}
 		// First we calculate the total size required to hold the content of the combined content.
@@ -732,15 +701,15 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 	}
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
-		p, ok := conn.recoveryQueue.take(sequenceNumber)
+		p, ok := conn.retransmission.acknowledge(sequenceNumber)
 		if ok {
 			// Clear the packet and return it to the pool so that it may be re-used.
 			p.content = nil
 			packetPool.Put(p)
 		}
 	}
-	if atomic.LoadInt32(&conn.resends) > 0 {
-		atomic.AddInt32(&conn.resends, -1)
+	if conn.resends > 0 {
+		conn.resends--
 	}
 	return nil
 }
@@ -761,7 +730,7 @@ func (conn *Conn) handleNACK(b *bytes.Buffer) error {
 // resend sends all datagrams currently in the recovery queue with the sequence numbers passed.
 func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
-		packet, ok := conn.recoveryQueue.takeWithoutDelayAdd(sequenceNumber)
+		pk, ok := conn.retransmission.retransmit(sequenceNumber)
 		if !ok {
 			// We could not resend this datagram. Maybe it was already resent before at the request of the
 			// client. This is generally expected so we just continue.
@@ -775,15 +744,15 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		newSeqNum := conn.seq
 		conn.seq++
 		writeUint24(conn.buf, newSeqNum)
-		packet.write(conn.buf)
+		pk.write(conn.buf)
 
-		// We then send the packet to the connection.
+		// We then send the pk to the connection.
 		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.addr); err != nil {
-			return fmt.Errorf("error sending packet to addr %v: %v", conn.addr, err)
+			return fmt.Errorf("error sending pk to addr %v: %v", conn.addr, err)
 		}
-		// We then re-add the packet to the recovery queue in case the new one gets lost too, in which case
+		// We then re-add the pk to the recovery queue in case the new one gets lost too, in which case
 		// we need to resend it again.
-		conn.recoveryQueue.put(newSeqNum, packet)
+		conn.retransmission.add(newSeqNum, pk)
 		conn.buf.Reset()
 	}
 	return nil

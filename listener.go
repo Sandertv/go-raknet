@@ -3,6 +3,7 @@ package raknet
 import (
 	"bytes"
 	"fmt"
+	"github.com/df-mc/atomic"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log"
 	"math"
@@ -10,7 +11,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -46,11 +46,11 @@ type Listener struct {
 
 	// pongData is a byte slice of data that is sent in an unconnected pong packet each time the client sends
 	// and unconnected ping to the server.
-	pongData atomic.Value
+	pongData atomic.Value[[]byte]
 }
 
 // listenerID holds the next ID to use for a Listener.
-var listenerID = rand.New(rand.NewSource(time.Now().Unix())).Int63()
+var listenerID = atomic.NewInt64(rand.New(rand.NewSource(time.Now().Unix())).Int63())
 
 // Listen listens on the address passed and returns a listener that may be used to accept connections. If not
 // successful, an error is returned.
@@ -64,17 +64,16 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 	}
 	listener := &Listener{
 		conn:     conn,
-		incoming: make(chan *Conn, 128),
+		incoming: make(chan *Conn),
 		closed:   make(chan struct{}),
 		log:      log.New(os.Stderr, "", log.LstdFlags),
-		id:       atomic.AddInt64(&listenerID, 1),
+		id:       listenerID.Inc(),
 	}
 	if l.ErrorLog != nil {
 		listener.log = l.ErrorLog
 	}
-	listener.pongData.Store([]byte{})
-	go listener.listen()
 
+	go listener.listen()
 	return listener, nil
 }
 
@@ -148,7 +147,7 @@ func (listener *Listener) listen() {
 		// Technically we should not re-use the same byte slice after its ownership has been taken by the
 		// buffer, but we can do this anyway because we copy the data later.
 		if err := listener.handle(buf, addr); err != nil {
-			listener.log.Printf("error handling packet (rakAddr = %v): %v\n", addr, err)
+			listener.log.Printf("listener: error handling packet (addr = %v): %v\n", addr, err)
 		}
 		buf.Reset()
 	}
@@ -189,7 +188,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 	default:
 		err := conn.receive(b)
 		if err != nil {
-			_ = conn.Close()
+			conn.closeImmediately()
 		}
 		return err
 	}
@@ -271,7 +270,7 @@ func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) 
 	}
 	b.Reset()
 
-	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: listener.pongData.Load().([]byte)}).Write(b)
+	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: listener.pongData.Load()}).Write(b)
 	_, err := listener.conn.WriteTo(b.Bytes(), addr)
 	return err
 }
