@@ -356,6 +356,7 @@ func (state *connState) sendOpenConnectionRequest1(mtu uint16) error {
 	b := new(bytes.Buffer)
 	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MaximumSizeNotDropped: mtu}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
+	state.mtuSize -= 46
 	return err
 }
 

@@ -8,7 +8,6 @@ import (
 
 var (
 	errBufferTooSmall = errors.New("a message sent was larger than the buffer used to receive the message into")
-
 	errListenerClosed = errors.New("use of closed listener")
 )
 
