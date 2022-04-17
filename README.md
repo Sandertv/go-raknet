@@ -10,8 +10,7 @@ API used to listen for connections or connect to servers.
 ## Getting started
 
 ### Prerequisites
-To use this library, Go must be installed. go-raknet does not depend on any other libraries than the standard
-Go library.
+To use this library, at least **Go 1.18** must be installed.
 
 ### Usage
 go-raknet can be used for both clients and servers, (and proxies, when combined) in a way very similar to the
