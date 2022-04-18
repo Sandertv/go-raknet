@@ -61,9 +61,6 @@ type Conn struct {
 	// second. When ticked, all of these packets are sent in an ACK and the slice is cleared.
 	ackSlice []uint24
 
-	// missingDatagramTimes is the times that a datagram was received, but a previous datagram was not.
-	missingDatagramTimes int
-
 	// packetQueue is an ordered queue containing packets indexed by their order index.
 	packetQueue *packetQueue
 	// packets is a channel containing content of packets that were fully processed. Calling Conn.Read()
