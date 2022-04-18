@@ -4,20 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/df-mc/atomic"
+	"golang.org/x/net/proxy"
 	"log"
 	"math/rand"
 	"net"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/sandertv/go-raknet/internal/message"
 )
-
-// UpstreamDialer is an interface for anything compatible with net.Dialer.
-type UpstreamDialer interface {
-	Dial(network, address string) (net.Conn, error)
-}
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
 // slice containing the data is returned. If the ping failed, an error is returned describing the failure.
@@ -73,7 +69,7 @@ func DialTimeout(address string, timeout time.Duration) (*Conn, error) {
 // DialContext attempts to dial a RakNet connection to the address passed. The address may be either an IP
 // address or a hostname, combined with a port that is separated with ':'.
 // DialContext will use the deadline (ctx.Deadline) of the context.Context passed for the maximum amount of
-// time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
+// time that the dialing can acknowledge. DialContext will terminate as soon as possible when the context.Context is
 // closed.
 func DialContext(ctx context.Context, address string) (*Conn, error) {
 	var d Dialer
@@ -88,7 +84,7 @@ type Dialer struct {
 	ErrorLog *log.Logger
 
 	// UpstreamDialer is a dialer that will override the default dialer for opening outgoing connections.
-	UpstreamDialer UpstreamDialer
+	UpstreamDialer proxy.Dialer
 }
 
 // Ping sends a ping to an address and returns the response obtained. If successful, a non-nil response byte
@@ -121,60 +117,45 @@ func (dialer Dialer) PingTimeout(address string, timeout time.Duration) ([]byte,
 // PingContext could last indefinitely, hence a timeout should always be attached to the context passed.
 // PingContext cancels as soon as the deadline expires.
 func (dialer Dialer) PingContext(ctx context.Context, address string) (response []byte, err error) {
-	var conn net.Conn
-
-	if dialer.UpstreamDialer == nil {
-		conn, err = net.Dial("udp", address)
-	} else {
-		conn, err = dialer.UpstreamDialer.Dial("udp", address)
+	var (
+		dial = net.Dial
+		done = make(chan struct{})
+		data = make([]byte, 1500)
+		buf  = new(bytes.Buffer)
+		pong = new(message.UnconnectedPong)
+	)
+	if dialer.UpstreamDialer != nil {
+		dial = dialer.UpstreamDialer.Dial
 	}
+	conn, err := dial("udp", address)
 	if err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: err}
+		return nil, netErr("ping", err)
 	}
-	done := make(chan struct{})
 	defer close(done)
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = conn.Close()
-		}
-	}()
-	actual := func(e error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return e
-	}
+	go ctxClose(ctx, done, conn)
 
-	buffer := bytes.NewBuffer(nil)
-	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&dialerID, 1)}).Write(buffer)
-	if _, err := conn.Write(buffer.Bytes()); err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: actual(err)}
+	(&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: dialerID.Inc()}).Write(buf)
+	if _, err := conn.Write(buf.Bytes()); err != nil {
+		return nil, netErr("ping", ctx.Err())
 	}
-	buffer.Reset()
+	buf.Reset()
 
-	data := make([]byte, 1492)
 	n, err := conn.Read(data)
 	if err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: actual(err)}
+		return nil, netErr("ping", err)
 	}
-	data = data[:n]
 
-	_, _ = buffer.Write(data)
-	if b, err := buffer.ReadByte(); err != nil || b != message.IDUnconnectedPong {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: fmt.Errorf("non-pong packet found: %w", err)}
-	}
-	pong := &message.UnconnectedPong{}
-	if err := pong.Read(buffer); err != nil {
-		return nil, &net.OpError{Op: "ping", Net: "raknet", Source: nil, Addr: nil, Err: fmt.Errorf("invalid unconnected pong: %w", err)}
+	_, _ = buf.Write(data[:n])
+	id, _ := buf.ReadByte()
+	if err = pong.Read(buf); err != nil || id != message.IDUnconnectedPong {
+		return nil, netErr("ping", fmt.Errorf("invalid unconnected pong: %w", err))
 	}
 	_ = conn.Close()
 	return pong.Data, nil
 }
 
 // dialerID is a counter used to produce an ID for the client.
-var dialerID = rand.New(rand.NewSource(time.Now().Unix())).Int63()
+var dialerID = atomic.NewInt64(rand.New(rand.NewSource(time.Now().Unix())).Int63())
 
 // Dial attempts to dial a RakNet connection to the address passed. The address may be either an IP address
 // or a hostname, combined with a port that is separated with ':'.
@@ -199,64 +180,51 @@ func (dialer Dialer) DialTimeout(address string, timeout time.Duration) (*Conn, 
 // DialContext attempts to dial a RakNet connection to the address passed. The address may be either an IP
 // address or a hostname, combined with a port that is separated with ':'.
 // DialContext will use the deadline (ctx.Deadline) of the context.Context passed for the maximum amount of
-// time that the dialing can take. DialContext will terminate as soon as possible when the context.Context is
+// time that the dialing can acknowledge. DialContext will terminate as soon as possible when the context.Context is
 // closed.
 func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, error) {
-	var udpConn net.Conn
-	var err error
-
-	if dialer.UpstreamDialer == nil {
-		udpConn, err = net.Dial("udp", address)
-	} else {
-		udpConn, err = dialer.UpstreamDialer.Dial("udp", address)
+	dial := net.Dial
+	if dialer.UpstreamDialer != nil {
+		dial = dialer.UpstreamDialer.Dial
 	}
-	if err != nil {
-		return nil, &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
-	}
-	packetConn := udpConn.(net.PacketConn)
-
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = packetConn.SetDeadline(deadline)
-	}
-
-	id := atomic.AddInt64(&dialerID, 1)
 	if dialer.ErrorLog == nil {
 		dialer.ErrorLog = log.New(os.Stderr, "", log.LstdFlags)
 	}
+	udp, err := dial("udp", address)
+	if err != nil {
+		return nil, err
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go ctxClose(ctx, done, udp)
+
 	state := &connState{
-		conn:               udpConn,
-		remoteAddr:         udpConn.RemoteAddr(),
-		discoveringMTUSize: 1492,
-		id:                 id,
+		id:      dialerID.Inc(),
+		mtuSize: 1492,
+		conn:    udp,
 	}
-	timeout := func(ctx context.Context) error {
-		return &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: ctx.Err()}
+	if err := state.discoverMTUSize(); err != nil {
+		return nil, netErr("dial", err)
 	}
-
-	if err := state.discoverMTUSize(ctx); err != nil {
-		return nil, timeout(ctx)
-	} else if err := state.openConnectionRequest(ctx); err != nil {
-		return nil, timeout(ctx)
+	if err := state.openConnectionRequest(); err != nil {
+		return nil, netErr("dial", err)
 	}
 
-	conn := newConn(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), uint16(atomic.LoadUint32(&state.mtuSize)))
-	conn.close = func() {
-		// We have to make the Conn call this method explicitly because it must not close the connection
-		// established by the Listener. (This would close the entire listener.)
-		_ = udpConn.Close()
-	}
-	if err := conn.requestConnection(id); err != nil {
-		return nil, timeout(ctx)
+	conn := newConn(wrappedConn{PacketConn: udp.(net.PacketConn)}, udp.RemoteAddr(), state.mtuSize)
+	conn.close = func() { _ = udp.Close() }
+	if err = conn.requestConnection(state.id); err != nil {
+		return nil, netErr("dial", err)
 	}
 
-	go clientListen(conn, udpConn, dialer.ErrorLog)
+	go clientListen(conn, udp, dialer.ErrorLog)
 	select {
 	case <-conn.connected:
-		_ = packetConn.SetDeadline(time.Time{})
+		_ = udp.SetDeadline(time.Unix(1, 0))
 		return conn, nil
 	case <-ctx.Done():
 		_ = conn.Close()
-		return nil, timeout(ctx)
+		return nil, netErr("dial", ctx.Err())
 	}
 }
 
@@ -268,7 +236,7 @@ type wrappedConn struct {
 
 // WriteTo wraps around net.PacketConn to replace functionality of WriteTo with Write. It is used to be able
 // to re-use the functionality in raknet.Conn.
-func (conn *wrappedConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
+func (conn wrappedConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
 	return conn.PacketConn.(net.Conn).Write(b)
 }
 
@@ -282,16 +250,13 @@ func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 	for {
 		n, err := conn.Read(b)
 		if err != nil {
-			if ErrConnectionClosed(err) {
-				// The connection was closed, so we can return from the function without logging the error.
-				return
-			}
-			errorLog.Printf("client: error reading from Conn: %v", err)
+			// The connection was closed, so we can return from the function without logging the error.
 			return
 		}
 		buf.Write(b[:n])
 		if err := rakConn.receive(buf); err != nil {
-			errorLog.Printf("error handling packet: %v\n", err)
+			errorLog.Printf("client: error handling packet: %v\n", err)
+			_ = rakConn.Close()
 		}
 		buf.Reset()
 	}
@@ -300,152 +265,78 @@ func clientListen(rakConn *Conn, conn net.Conn, errorLog *log.Logger) {
 // connState represents a state of a connection before the connection is finalised. It holds some data
 // collected during the connection.
 type connState struct {
-	conn       net.Conn
-	remoteAddr net.Addr
-	id         int64
+	conn net.Conn
+	id   int64
 
-	// mtuSize is the final MTU size found by sending open connection request 1 packets. It is the MTU size
-	// sent by the server.
-	mtuSize uint32
-
-	// discoveringMTUSize is the current MTU size 'discovered'. This MTU size decreases the more the open
-	// connection request 1 is sent, so that the max packet size can be discovered.
-	discoveringMTUSize uint16
-}
-
-// openConnectionRequest sends open connection request 2 packets continuously until it receives an open
-// connection reply 2 packet from the server.
-func (state *connState) openConnectionRequest(ctx context.Context) (e error) {
-	ticker := time.NewTicker(time.Second / 2)
-	defer ticker.Stop()
-
-	stop := make(chan bool)
-	defer func() {
-		close(stop)
-	}()
-	// Use an intermediate channel to start the ticker immediately.
-	c := make(chan struct{}, 1)
-	c <- struct{}{}
-	go func() {
-		for {
-			select {
-			case <-c:
-				if err := state.sendOpenConnectionRequest2(uint16(atomic.LoadUint32(&state.mtuSize))); err != nil {
-					e = err
-					return
-				}
-			case <-ticker.C:
-				c <- struct{}{}
-			case <-stop:
-				return
-			case <-ctx.Done():
-				_ = state.conn.Close()
-				return
-			}
-		}
-	}()
-
-	b := make([]byte, 1492)
-	for {
-		// Start reading in a loop so that we can find open connection reply 2 packets.
-		n, err := state.conn.Read(b)
-		if err != nil {
-			return err
-		}
-		buffer := bytes.NewBuffer(b[:n])
-		id, err := buffer.ReadByte()
-		if err != nil {
-			return fmt.Errorf("error reading packet ID: %v", err)
-		}
-		if id != message.IDOpenConnectionReply2 {
-			// We got a packet, but the packet was not an open connection reply 2 packet. We simply discard it
-			// and continue reading.
-			continue
-		}
-		reply := &message.OpenConnectionReply2{}
-		if err := reply.Read(buffer); err != nil {
-			return fmt.Errorf("error reading open connection reply 2: %v", err)
-		}
-		atomic.StoreUint32(&state.mtuSize, uint32(reply.MTUSize))
-		return
-	}
+	// mtuSize is the current MTU size of the connection. This value is negotiated by both ends of the connection
+	// during this stage.
+	mtuSize uint16
 }
 
 // discoverMTUSize starts discovering an MTU size, the maximum packet size we can send, by sending multiple
 // open connection request 1 packets to the server with a decreasing MTU size padding.
-func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
-	ticker := time.NewTicker(time.Second / 2)
-	defer ticker.Stop()
-	var staticMTU uint16
-
-	stop := make(chan struct{})
-	defer func() {
-		close(stop)
-	}()
-	// Use an intermediate channel to start the ticker immediately.
-	c := make(chan struct{}, 1)
-	c <- struct{}{}
-	go func() {
-		for {
-			select {
-			case <-c:
-				mtu := state.discoveringMTUSize
-				if staticMTU != 0 {
-					mtu = staticMTU
-				}
-				if err := state.sendOpenConnectionRequest1(mtu); err != nil {
-					e = err
-					return
-				}
-				if staticMTU == 0 {
-					// Each half second we decrease the MTU size by 40. This means that in 10 seconds, we have an MTU
-					// size of 692. This is a little above the actual RakNet minimum, but that should not be an issue.
-					state.discoveringMTUSize -= 40
-				}
-			case <-ticker.C:
-				c <- struct{}{}
-			case <-stop:
-				return
-			case <-ctx.Done():
-				_ = state.conn.Close()
-				return
+func (state *connState) discoverMTUSize() error {
+	return state.poll(time.Second/2, state.sendOpenConnectionRequest1, func(id byte, buf *bytes.Buffer) (bool, error) {
+		switch id {
+		case message.IDOpenConnectionReply1:
+			response := &message.OpenConnectionReply1{}
+			if err := response.Read(buf); err != nil {
+				return false, fmt.Errorf("error reading open connection reply 1: %v", err)
 			}
+			if response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
+				return false, fmt.Errorf("invalid server mtu size %v", response.ServerPreferredMTUSize)
+			}
+			state.mtuSize = response.ServerPreferredMTUSize
+			return false, nil
+		case message.IDIncompatibleProtocolVersion:
+			response := &message.IncompatibleProtocolVersion{}
+			_ = response.Read(buf)
+			return false, fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", currentProtocol, response.ServerProtocol)
 		}
-	}()
+		return true, nil
+	})
+}
 
-	b := make([]byte, 1492)
+// openConnectionRequest sends open connection request 2 packets continuously until it receives an open
+// connection reply 2 packet from the server.
+func (state *connState) openConnectionRequest() error {
+	return state.poll(time.Second/2, state.sendOpenConnectionRequest2, func(id byte, buf *bytes.Buffer) (bool, error) {
+		if id != message.IDOpenConnectionReply2 {
+			return true, nil
+		}
+		reply := &message.OpenConnectionReply2{}
+		if err := reply.Read(buf); err != nil {
+			return false, fmt.Errorf("error reading open connection reply 2: %w", err)
+		}
+		state.mtuSize = reply.MTUSize
+		return false, nil
+	})
+}
+
+// poll calls the send function at least once every dur. The function f passed is called for every packet read after
+// the send function was called. poll ends as soon as the underlying connection is closed, or if the f function returns
+// retry=false + err=nil.
+func (state *connState) poll(dur time.Duration, send func(mtu uint16) error, f func(id byte, buf *bytes.Buffer) (retry bool, err error)) error {
+	b := make([]byte, 1500)
 	for {
-		// Start reading in a loop so that we can find open connection reply 1 packets.
+		if err := send(state.mtuSize); err != nil {
+			return err
+		}
+		_ = state.conn.SetReadDeadline(time.Now().Add(dur))
+
 		n, err := state.conn.Read(b)
-		if err != nil {
+		if opErr, ok := err.(net.Error); ok && opErr.Timeout() {
+			continue
+		} else if err != nil {
 			return err
 		}
 		buffer := bytes.NewBuffer(b[:n])
 		id, err := buffer.ReadByte()
 		if err != nil {
-			return fmt.Errorf("error reading packet ID: %v", err)
+			continue
 		}
-		switch id {
-		case message.IDOpenConnectionReply1:
-			response := &message.OpenConnectionReply1{}
-			if err := response.Read(buffer); err != nil {
-				return fmt.Errorf("error reading open connection reply 1: %v", err)
-			}
-			if response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
-				// This is an awful hack we cooked up to deal with OVH 'DDoS' protection. For some reason they
-				// send a broken MTU size first. Sending a Request2 followed by a Request1 deals with this.
-				_ = state.sendOpenConnectionRequest2(response.ServerPreferredMTUSize)
-				staticMTU = state.discoveringMTUSize + 40
-				continue
-			}
-			atomic.StoreUint32(&state.mtuSize, uint32(response.ServerPreferredMTUSize))
-			return
-		case message.IDIncompatibleProtocolVersion:
-			response := &message.IncompatibleProtocolVersion{}
-			if err := response.Read(buffer); err != nil {
-				return fmt.Errorf("error reading incompatible protocol version: %v", err)
-			}
-			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", currentProtocol, response.ServerProtocol)
+		if retry, err := f(id, buffer); err != nil || !retry {
+			return err
 		}
 	}
 }
@@ -453,8 +344,8 @@ func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 // sendOpenConnectionRequest2 sends an open connection request 2 packet to the server. If not successful, an
 // error is returned.
 func (state *connState) sendOpenConnectionRequest2(mtu uint16) error {
-	b := bytes.NewBuffer(nil)
-	(&message.OpenConnectionRequest2{ServerAddress: *state.remoteAddr.(*net.UDPAddr), ClientPreferredMTUSize: mtu, ClientGUID: state.id}).Write(b)
+	b := new(bytes.Buffer)
+	(&message.OpenConnectionRequest2{ServerAddress: *state.conn.RemoteAddr().(*net.UDPAddr), ClientPreferredMTUSize: mtu, ClientGUID: state.id}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
 	return err
 }
@@ -462,8 +353,23 @@ func (state *connState) sendOpenConnectionRequest2(mtu uint16) error {
 // sendOpenConnectionRequest1 sends an open connection request 1 packet to the server. If not successful, an
 // error is returned.
 func (state *connState) sendOpenConnectionRequest1(mtu uint16) error {
-	b := bytes.NewBuffer(nil)
+	b := new(bytes.Buffer)
 	(&message.OpenConnectionRequest1{Protocol: currentProtocol, MaximumSizeNotDropped: mtu}).Write(b)
 	_, err := state.conn.Write(b.Bytes())
+	state.mtuSize -= 46
 	return err
+}
+
+// netErr wraps an operation and error into a *net.OpError.
+func netErr(op string, err error) *net.OpError {
+	return &net.OpError{Op: op, Net: "raknet", Source: nil, Addr: nil, Err: err}
+}
+
+// ctxClose closes a net.Conn if the Context passed is closed before the channel passed is.
+func ctxClose(ctx context.Context, done <-chan struct{}, conn net.Conn) {
+	select {
+	case <-done:
+	case <-ctx.Done():
+		_ = conn.Close()
+	}
 }
