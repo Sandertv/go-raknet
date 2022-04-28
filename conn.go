@@ -23,12 +23,16 @@ const (
 // but rather a connection emulated using RakNet.
 // Methods may be called on Conn from multiple goroutines simultaneously.
 type Conn struct {
+	// rtt is the last measured round-trip time between both ends of the connection. The rtt is measured in nanoseconds.
+	rtt atomic.Int64
+	
+	closing           atomic.Int64
+	
 	conn net.PacketConn
 	addr net.Addr
 
 	once              sync.Once
 	closed, connected chan struct{}
-	closing           atomic.Int64
 	close             func()
 
 	mu  sync.Mutex
@@ -44,9 +48,6 @@ type Conn struct {
 	// mtuSize is the MTU size of the connection. Packets longer than this size must be split into fragments
 	// for them to arrive at the client without losing bytes.
 	mtuSize uint16
-
-	// rtt is the last measured round-trip time between both ends of the connection. The rtt is measured in nanoseconds.
-	rtt atomic.Int64
 
 	// splits is a map of slices indexed by split IDs. The length of each of the slices is equal to the split
 	// count, and packets are positioned in that slice indexed by the split index.
