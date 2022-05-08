@@ -128,10 +128,12 @@ func (conn *Conn) startTicking() {
 				conn.checkResend(t)
 			}
 			if i%5 == 0 {
+				conn.mu.Lock()
 				if t.Sub(conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt()*2 {
 					// No activity for too long: Start timeout.
 					_ = conn.Close()
 				}
+				conn.mu.Unlock()
 			}
 			if unix := conn.closing.Load(); unix != 0 {
 				before := acksLeft
