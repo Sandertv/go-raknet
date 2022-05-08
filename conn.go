@@ -74,7 +74,7 @@ type Conn struct {
 	// timeouts in Read after calling SetReadDeadline.
 	readDeadline <-chan time.Time
 
-	resends int32
+	lastActivity atomic.Value[time.Time]
 }
 
 // newConn constructs a new connection specifically dedicated to the address passed.
@@ -97,6 +97,7 @@ func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
 		buf:            bytes.NewBuffer(make([]byte, 0, mtuSize)),
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 256)),
 		nackBuf:        bytes.NewBuffer(make([]byte, 0, 256)),
+		lastActivity:   *atomic.NewValue(time.Now()),
 	}
 	go c.startTicking()
 	return c
@@ -125,6 +126,12 @@ func (conn *Conn) startTicking() {
 			if i%3 == 0 {
 				conn.checkResend(t)
 			}
+			if i%5 == 0 {
+				if t.Sub(conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt()*2 {
+					// No activity for too long: Start timeout.
+					_ = conn.Close()
+				}
+			}
 			if unix := conn.closing.Load(); unix != 0 {
 				before := acksLeft
 				conn.mu.Lock()
@@ -137,6 +144,7 @@ func (conn *Conn) startTicking() {
 
 				since := time.Since(time.Unix(unix, 0))
 				if (acksLeft == 0 && since > time.Second) || since > time.Second*8 {
+					fmt.Println("Timeout done")
 					conn.closeImmediately()
 				}
 			}
@@ -182,12 +190,6 @@ func (conn *Conn) checkResend(now time.Time) {
 		}
 	}
 	_ = conn.resend(resend)
-
-	if len(resend) != 0 {
-		if conn.resends++; conn.resends > 50 {
-			_ = conn.Close()
-		}
-	}
 }
 
 // Write writes a buffer b over the RakNet connection. The amount of bytes written n is always equal to the
@@ -424,6 +426,7 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 		// Ignore packets that do not have the datagram bitflag.
 		return nil
 	}
+	conn.lastActivity.Store(time.Now())
 	switch {
 	case headerFlags&bitFlagACK != 0:
 		return conn.handleACK(b)
@@ -704,9 +707,6 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 			p.content = nil
 			packetPool.Put(p)
 		}
-	}
-	if conn.resends > 0 {
-		conn.resends--
 	}
 	return nil
 }
