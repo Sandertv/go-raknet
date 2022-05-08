@@ -25,9 +25,9 @@ const (
 type Conn struct {
 	// rtt is the last measured round-trip time between both ends of the connection. The rtt is measured in nanoseconds.
 	rtt atomic.Int64
-	
-	closing           atomic.Int64
-	
+
+	closing atomic.Int64
+
 	conn net.PacketConn
 	addr net.Addr
 
@@ -145,7 +145,6 @@ func (conn *Conn) startTicking() {
 
 				since := time.Since(time.Unix(unix, 0))
 				if (acksLeft == 0 && since > time.Second) || since > time.Second*8 {
-					fmt.Println("Timeout done")
 					conn.closeImmediately()
 				}
 			}
