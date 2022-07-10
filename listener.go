@@ -14,11 +14,19 @@ import (
 	"time"
 )
 
+// UpstreamPacketListener allows for a custom PacketListener implementation.
+type UpstreamPacketListener interface {
+	ListenPacket(network, address string) (net.PacketConn, error)
+}
+
 // ListenConfig may be used to pass additional configuration to a Listener.
 type ListenConfig struct {
 	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
 	// simply discards the messages.
 	ErrorLog *log.Logger
+
+	// UpstreamPacketListener adds an abstraction for net.ListenPacket.
+	UpstreamPacketListener UpstreamPacketListener
 }
 
 // Listener implements a RakNet connection listener. It follows the same methods as those implemented by the
@@ -58,7 +66,14 @@ var listenerID = atomic.NewInt64(rand.New(rand.NewSource(time.Now().Unix())).Int
 // Specific features of the listener may be modified once it is returned, such as the used log and/or the
 // accepted protocol.
 func (l ListenConfig) Listen(address string) (*Listener, error) {
-	conn, err := net.ListenPacket("udp", address)
+	var conn net.PacketConn
+	var err error
+
+	if l.UpstreamPacketListener == nil {
+		conn, err = net.ListenPacket("udp", address)
+	} else {
+		conn, err = l.UpstreamPacketListener.ListenPacket("udp", address)
+	}
 	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
