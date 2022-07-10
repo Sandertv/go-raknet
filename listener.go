@@ -19,14 +19,6 @@ type UpstreamPacketListener interface {
 	ListenPacket(network, address string) (net.PacketConn, error)
 }
 
-// PacketListener is a default implementation of an UpstreamPacketListener.
-type PacketListener struct{}
-
-// ListenPacket wraps the net.ListenPacket function.
-func (l *PacketListener) ListenPacket(network, address string) (net.PacketConn, error) {
-	return net.ListenPacket(network, address)
-}
-
 // ListenConfig may be used to pass additional configuration to a Listener.
 type ListenConfig struct {
 	// ErrorLog is a logger that errors from packet decoding are logged to. It may be set to a logger that
@@ -74,7 +66,14 @@ var listenerID = atomic.NewInt64(rand.New(rand.NewSource(time.Now().Unix())).Int
 // Specific features of the listener may be modified once it is returned, such as the used log and/or the
 // accepted protocol.
 func (l ListenConfig) Listen(address string) (*Listener, error) {
-	conn, err := l.UpstreamPacketListener.ListenPacket("udp", address)
+	var conn net.PacketConn
+	var err error
+
+	if l.UpstreamPacketListener == nil {
+		conn, err = net.ListenPacket("udp", address)
+	} else {
+		conn, err = l.UpstreamPacketListener.ListenPacket("udp", address)
+	}
 	if err != nil {
 		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
@@ -98,11 +97,9 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 // The address follows the same rules as those defined in the net.TCPListen() function.
 // Specific features of the listener may be modified once it is returned, such as the used log and/or the
 // accepted protocol.
-// This uses the PacketListener as the UpstreamPacketListener.
 func Listen(address string) (*Listener, error) {
-	return ListenConfig{
-		UpstreamPacketListener: &PacketListener{},
-	}.Listen(address)
+	var lc ListenConfig
+	return lc.Listen(address)
 }
 
 // Accept blocks until a connection can be accepted by the listener. If successful, Accept returns a
