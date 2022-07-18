@@ -28,8 +28,9 @@ type Conn struct {
 
 	closing atomic.Int64
 
-	conn net.PacketConn
-	addr net.Addr
+	conn   net.PacketConn
+	addr   net.Addr
+	limits bool
 
 	once              sync.Once
 	closed, connected chan struct{}
@@ -80,12 +81,20 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address passed.
 func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
+	return newConnWithLimits(conn, addr, mtuSize, true)
+}
+
+// newConnWithLimits returns a Conn for the net.Addr passed with a specific mtu size. The limits bool passed specifies
+// if the connection should limit the bounds of things such as the size of packets. This is generally recommended for
+// connections coming from a client.
+func newConnWithLimits(conn net.PacketConn, addr net.Addr, mtuSize uint16, limits bool) *Conn {
 	if mtuSize < 500 || mtuSize > 1500 {
 		mtuSize = maxMTUSize
 	}
 	c := &Conn{
 		addr:           addr,
 		conn:           conn,
+		limits:         limits,
 		mtuSize:        mtuSize,
 		pk:             new(packet),
 		closed:         make(chan struct{}),
@@ -467,7 +476,7 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 			}
 		}
 	}
-	if conn.win.size() > maxWindowSize {
+	if conn.win.size() > maxWindowSize && conn.limits {
 		return fmt.Errorf("datagram receive queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
 	return conn.handleDatagram(b)
@@ -501,7 +510,7 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// An ordered packet arrived twice.
 		return nil
 	}
-	if conn.packetQueue.WindowSize() > maxWindowSize {
+	if conn.packetQueue.WindowSize() > maxWindowSize && conn.limits {
 		return fmt.Errorf("packet queue window size is too big (%v-%v)", conn.packetQueue.lowest, conn.packetQueue.highest)
 	}
 	for _, content := range conn.packetQueue.fetch() {
@@ -620,7 +629,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 256
-	if p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount {
+	if (p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount) && conn.limits {
 		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
 	}
 	m, ok := conn.splits[p.splitID]
