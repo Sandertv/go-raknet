@@ -229,14 +229,14 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		discoveringMTUSize: 1492,
 		id:                 id,
 	}
-	timeout := func(ctx context.Context) error {
-		return &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: ctx.Err()}
+	wrap := func(ctx context.Context, err error) error {
+		return &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 
 	if err := state.discoverMTUSize(ctx); err != nil {
-		return nil, timeout(ctx)
+		return nil, wrap(ctx, err)
 	} else if err := state.openConnectionRequest(ctx); err != nil {
-		return nil, timeout(ctx)
+		return nil, wrap(ctx, err)
 	}
 
 	conn := newConnWithLimits(&wrappedConn{PacketConn: packetConn}, udpConn.RemoteAddr(), uint16(atomic.LoadUint32(&state.mtuSize)), false)
@@ -246,7 +246,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		_ = udpConn.Close()
 	}
 	if err := conn.requestConnection(id); err != nil {
-		return nil, timeout(ctx)
+		return nil, wrap(ctx, err)
 	}
 
 	go clientListen(conn, udpConn, dialer.ErrorLog)
@@ -256,7 +256,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		return conn, nil
 	case <-ctx.Done():
 		_ = conn.Close()
-		return nil, timeout(ctx)
+		return nil, wrap(ctx, ctx.Err())
 	}
 }
 
