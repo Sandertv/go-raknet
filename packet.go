@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	// bitFlagDatagram is set for every valid datagram. It is used to identify packets that are datagrams.
+	// bitFlagDatagram is set for every valid datagram. It is used to identify
+	// packets that are datagrams.
 	bitFlagDatagram = 0x80
 	// bitFlagACK is set for every ACK packet.
 	bitFlagACK = 0x40
@@ -19,31 +20,34 @@ const (
 	bitFlagNeedsBAndAS = 0x04
 )
 
-//noinspection GoUnusedConst
+// noinspection GoUnusedConst
 const (
-	// reliabilityUnreliable means that the packet sent could arrive out of order, be duplicated, or just not
-	// arrive at all. It is usually used for high frequency packets of which the order does not matter.
-	//lint:ignore U1000 While this constant is unused, it is here for the sake of having all reliabilities.
+	// reliabilityUnreliable means that the packet sent could arrive out of
+	// order, be duplicated, or just not arrive at all. It is usually used for
+	// high frequency packets of which the order does not matter.
 	reliabilityUnreliable byte = iota
-	// reliabilityUnreliableSequenced means that the packet sent could be duplicated or not arrive at all, but
-	// ensures that it is always handled in the right order.
+	// reliabilityUnreliableSequenced means that the packet sent could be
+	// duplicated or not arrive at all, but ensures that it is always handled in
+	// the right order.
 	reliabilityUnreliableSequenced
-	// reliabilityReliable means that the packet sent could not arrive, or arrive out of order, but ensures
-	// that the packet is not duplicated.
+	// reliabilityReliable means that the packet sent could not arrive, or
+	// arrive out of order, but ensures that the packet is not duplicated.
 	reliabilityReliable
-	// reliabilityReliableOrdered means that every packet sent arrives, arrives in the right order and is not
-	// duplicated.
+	// reliabilityReliableOrdered means that every packet sent arrives, arrives
+	// in the right order and is not duplicated.
 	reliabilityReliableOrdered
-	// reliabilityReliableSequenced means that the packet sent could not arrive, but ensures that the packet
-	// will be in the right order and not be duplicated.
+	// reliabilityReliableSequenced means that the packet sent could not arrive,
+	// but ensures that the packet will be in the right order and not be
+	// duplicated.
 	reliabilityReliableSequenced
 
-	// splitFlag is set in the header if the packet was split. If so, the encapsulation contains additional
-	// data about the fragment.
+	// splitFlag is set in the header if the packet was split. If so, the
+	// encapsulation contains additional data about the fragment.
 	splitFlag = 0x10
 )
 
-// packet is an encapsulation around every packet sent after the connection is established. It is
+// packet is an encapsulation around every packet sent after the connection is
+// established. It is
 type packet struct {
 	reliability byte
 
@@ -174,19 +178,21 @@ func (packet *packet) sequenced() bool {
 }
 
 const (
-	// packetRange indicates a range of packets, followed by the first and the last packet in the range.
+	// packetRange indicates a range of packets, followed by the first and the
+	// last packet in the range.
 	packetRange = iota
 	// packetSingle indicates a single packet, followed by its sequence number.
 	packetSingle
 )
 
-// acknowledgement is an acknowledgement packet that may either be an ACK or a NACK, depending on the purpose
-// that it is sent with.
+// acknowledgement is an acknowledgement packet that may either be an ACK or a
+// NACK, depending on the purpose that it is sent with.
 type acknowledgement struct {
 	packets []uint24
 }
 
-// write encodes an acknowledgement packet and returns an error if not successful.
+// write encodes an acknowledgement packet and returns an error if not
+// successful.
 func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error) {
 	packets := ack.packets
 	if len(packets) == 0 {
@@ -204,7 +210,8 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 
 	for index, packet := range packets {
 		if buffer.Len() >= int(mtu-10) {
-			// We must make sure the final packet length doesn't exceed the MTU size.
+			// We must make sure the final packet length doesn't exceed the MTU
+			// size.
 			break
 		}
 		n++
@@ -215,15 +222,18 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 			continue
 		}
 		if packet == lastPacketInRange+1 {
-			// Packet is still part of the current range, as it's sequenced properly with the last packet.
-			// Set the last packet in range to the packet and continue to the next packet.
+			// Packet is still part of the current range, as it's sequenced
+			// properly with the last packet. Set the last packet in range to
+			// the packet and continue to the next packet.
 			lastPacketInRange = packet
 			continue
 		} else {
-			// We got to the end of a range/single packet. We need to write those down now.
+			// We got to the end of a range/single packet. We need to write
+			// those down now.
 			if firstPacketInRange == lastPacketInRange {
-				// First packet equals last packet, so we have a single packet record. Write down the packet,
-				// and set the first and last packet to the current packet.
+				// First packet equals last packet, so we have a single packet
+				// record. Write down the packet, and set the first and last
+				// packet to the current packet.
 				if err := buffer.WriteByte(packetSingle); err != nil {
 					return 0, err
 				}
@@ -232,8 +242,9 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 				firstPacketInRange = packet
 				lastPacketInRange = packet
 			} else {
-				// There's a gap between the first and last packet, so we have a range of packets. Write the
-				// first and last packet of the range and set both to the current packet.
+				// There's a gap between the first and last packet, so we have a
+				// range of packets. Write the first and last packet of the
+				// range and set both to the current packet.
 				if err := buffer.WriteByte(packetRange); err != nil {
 					return 0, err
 				}
@@ -243,13 +254,14 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 				firstPacketInRange = packet
 				lastPacketInRange = packet
 			}
-			// Keep track of the amount of records as we need to write that first.
+			// Keep track of the amount of records as we need to write that
+			// first.
 			recordCount++
 		}
 	}
 
-	// Make sure the last single packet/range is written, as we always need to know one packet ahead to know
-	// how we should write the current.
+	// Make sure the last single packet/range is written, as we always need to
+	// know one packet ahead to know how we should write the current.
 	if firstPacketInRange == lastPacketInRange {
 		if err := buffer.WriteByte(packetSingle); err != nil {
 			return 0, err
@@ -272,7 +284,8 @@ func (ack *acknowledgement) write(b *bytes.Buffer, mtu uint16) (n int, err error
 	return n, nil
 }
 
-// read decodes an acknowledgement packet and returns an error if not successful.
+// read decodes an acknowledgement packet and returns an error if not
+// successful.
 func (ack *acknowledgement) read(b *bytes.Buffer) error {
 	const maxAcknowledgementPackets = 8192
 	var recordCount int16

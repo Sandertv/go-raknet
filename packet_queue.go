@@ -12,7 +12,8 @@ func newPacketQueue() *packetQueue {
 	return &packetQueue{queue: make(map[uint24][]byte)}
 }
 
-// put puts a value at the index passed. If the index was already occupied once, false is returned.
+// put puts a value at the index passed. If the index was already occupied
+// once, false is returned.
 func (queue *packetQueue) put(index uint24, packet []byte) bool {
 	if index < queue.lowest {
 		return false
@@ -27,8 +28,9 @@ func (queue *packetQueue) put(index uint24, packet []byte) bool {
 	return true
 }
 
-// fetch attempts to take out as many values from the ordered queue as possible. Upon encountering an index
-// that has no value yet, the function returns all values that it did find and takes them out.
+// fetch attempts to take out as many values from the ordered queue as
+// possible. Upon encountering an index that has no value yet, the function
+// returns all values that it did find and takes them out.
 func (queue *packetQueue) fetch() (packets [][]byte) {
 	index := queue.lowest
 	for index < queue.highest {

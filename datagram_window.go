@@ -32,8 +32,8 @@ func (win *datagramWindow) add(index uint24) {
 	win.queue[index] = time.Now()
 }
 
-// shift attempts to delete as many indices from the queue as possible, increasing the lowest index if and when
-// possible.
+// shift attempts to delete as many indices from the queue as possible,
+// increasing the lowest index if and when possible.
 func (win *datagramWindow) shift() (n int) {
 	var index uint24
 	for index = win.lowest; index < win.highest; index++ {
@@ -47,8 +47,9 @@ func (win *datagramWindow) shift() (n int) {
 	return n
 }
 
-// missing returns a slice of all indices in the datagram queue that weren't set using add while within the
-// window of lowest and highest index. The queue is shifted after this call.
+// missing returns a slice of all indices in the datagram queue that weren't
+// set using add while within the window of lowest and highest index. The queue
+// is shifted after this call.
 func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
 	var (
 		missing = false
@@ -58,7 +59,8 @@ func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
 		t, ok := win.queue[i]
 		if ok {
 			if time.Since(t) >= since {
-				// All packets before this one took too long to arrive, so we mark them as missing.
+				// All packets before this one took too long to arrive, so we
+				// mark them as missing.
 				missing = true
 			}
 			continue
