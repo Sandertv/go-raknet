@@ -14,6 +14,9 @@ const (
 	bitFlagACK = 0x40
 	// bitFlagNACK is set for every NACK packet.
 	bitFlagNACK = 0x20
+	// bitFlagNeedsBAndAS is set for every datagram with packet data, but is not
+	// actually used.
+	bitFlagNeedsBAndAS = 0x04
 )
 
 //noinspection GoUnusedConst

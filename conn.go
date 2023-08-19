@@ -238,7 +238,7 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		messageIndex := conn.messageIndex
 		conn.messageIndex++
 
-		conn.buf.WriteByte(bitFlagDatagram)
+		conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
 		writeUint24(conn.buf, sequenceNumber)
 		pk := packetPool.Get().(*packet)
 		if cap(pk.content) < len(content) {
@@ -746,7 +746,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		}
 
 		// We first write a new datagram header using a new send sequence number that we find.
-		if err := conn.buf.WriteByte(bitFlagDatagram); err != nil {
+		if err := conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS); err != nil {
 			return fmt.Errorf("error writing recovered datagram header: %v", err)
 		}
 		newSeqNum := conn.seq
