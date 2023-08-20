@@ -25,6 +25,8 @@ const (
 	// reliabilityUnreliable means that the packet sent could arrive out of
 	// order, be duplicated, or just not arrive at all. It is usually used for
 	// high frequency packets of which the order does not matter.
+	//lint:ignore U1000 While this constant is unused, it is here for the sake
+	// of having all reliabilities documented.
 	reliabilityUnreliable byte = iota
 	// reliabilityUnreliableSequenced means that the packet sent could be
 	// duplicated or not arrive at all, but ensures that it is always handled in
