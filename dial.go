@@ -235,10 +235,9 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		dialer.ErrorLog = slog.Default()
 	}
 	state := &connState{
-		conn:               udpConn,
-		remoteAddr:         udpConn.RemoteAddr(),
-		discoveringMTUSize: 1492,
-		id:                 id,
+		conn:       udpConn,
+		remoteAddr: udpConn.RemoteAddr(),
+		id:         id,
 	}
 	wrap := func(ctx context.Context, err error) error {
 		return &net.OpError{Op: "dial", Net: "raknet", Source: nil, Addr: nil, Err: err}
@@ -320,11 +319,6 @@ type connState struct {
 	// mtuSize is the final MTU size found by sending an open connection request
 	// 1 packet. It is the MTU size sent by the server.
 	mtuSize uint32
-
-	// discoveringMTUSize is the current MTU size 'discovered'. This MTU size
-	// decreases the more the open connection request 1 is sent, so that the max
-	// packet size can be discovered.
-	discoveringMTUSize uint16
 }
 
 // openConnectionRequest sends open connection request 2 packets continuously
@@ -392,41 +386,28 @@ func (state *connState) openConnectionRequest(ctx context.Context) (e error) {
 func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
-	var staticMTU uint16
 
 	stop := make(chan struct{})
 	defer func() {
 		close(stop)
 	}()
-	// Use an intermediate channel to start the ticker immediately.
-	c := make(chan struct{}, 1)
-	c <- struct{}{}
 	go func() {
-		for {
-			select {
-			case <-c:
-				mtu := state.discoveringMTUSize
-				if staticMTU != 0 {
-					mtu = staticMTU
-				}
-				if err := state.sendOpenConnectionRequest1(mtu); err != nil {
+		sizes := []uint16{1492, 1200, 576}
+		for _, size := range sizes {
+			for attempt := 0; attempt < 3; attempt++ {
+				if err := state.sendOpenConnectionRequest1(size); err != nil {
 					e = err
 					return
 				}
-				if staticMTU == 0 {
-					// Each half second we decrease the MTU size by 40. This
-					// means that in 10 seconds, we have an MTU size of 692.
-					// This is a little above the actual RakNet minimum, but
-					// that should not be an issue.
-					state.discoveringMTUSize -= 40
+				select {
+				case <-ticker.C:
+					continue
+				case <-stop:
+					return
+				case <-ctx.Done():
+					_ = state.conn.Close()
+					return
 				}
-			case <-ticker.C:
-				c <- struct{}{}
-			case <-stop:
-				return
-			case <-ctx.Done():
-				_ = state.conn.Close()
-				return
 			}
 		}
 	}()
@@ -450,13 +431,12 @@ func (state *connState) discoverMTUSize(ctx context.Context) (e error) {
 			if err := response.Read(buffer); err != nil {
 				return fmt.Errorf("error reading open connection reply 1: %v", err)
 			}
-			if response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
+			if response.ServerGUID == 0 || response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
 				// This is an awful hack we cooked up to deal with OVH 'DDoS'
 				// protection. For some reason they send a broken MTU size
 				// first. Sending a Request2 followed by a Request1 deals with
 				// this.
 				_ = state.sendOpenConnectionRequest2(response.ServerPreferredMTUSize)
-				staticMTU = state.discoveringMTUSize + 40
 				continue
 			}
 			atomic.StoreUint32(&state.mtuSize, uint32(response.ServerPreferredMTUSize))
