@@ -1,8 +1,8 @@
 package message
 
 import (
-	"bytes"
 	"encoding/binary"
+	"io"
 )
 
 type ConnectionRequest struct {
@@ -11,15 +11,23 @@ type ConnectionRequest struct {
 	Secure           bool
 }
 
-func (pk *ConnectionRequest) Write(buf *bytes.Buffer) {
-	_ = binary.Write(buf, binary.BigEndian, IDConnectionRequest)
-	_ = binary.Write(buf, binary.BigEndian, pk.ClientGUID)
-	_ = binary.Write(buf, binary.BigEndian, pk.RequestTimestamp)
-	_ = binary.Write(buf, binary.BigEndian, pk.Secure)
+func (pk *ConnectionRequest) UnmarshalBinary(data []byte) error {
+	if len(data) < 17 {
+		return io.ErrUnexpectedEOF
+	}
+	pk.ClientGUID = int64(binary.BigEndian.Uint64(data))
+	pk.RequestTimestamp = int64(binary.BigEndian.Uint64(data[8:]))
+	pk.Secure = data[16] != 0
+	return nil
 }
 
-func (pk *ConnectionRequest) Read(buf *bytes.Buffer) error {
-	_ = binary.Read(buf, binary.BigEndian, &pk.ClientGUID)
-	_ = binary.Read(buf, binary.BigEndian, &pk.RequestTimestamp)
-	return binary.Read(buf, binary.BigEndian, &pk.Secure)
+func (pk *ConnectionRequest) MarshalBinary() (data []byte, err error) {
+	b := make([]byte, 18)
+	b[0] = IDConnectionRequest
+	binary.BigEndian.PutUint64(b[1:], uint64(pk.ClientGUID))
+	binary.BigEndian.PutUint64(b[9:], uint64(pk.RequestTimestamp))
+	if pk.Secure {
+		b[17] = 1
+	}
+	return b, nil
 }

@@ -3,9 +3,12 @@ package raknet
 import (
 	"bytes"
 	"context"
+	"encoding"
+	"errors"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +19,8 @@ const (
 	// specific.
 	currentProtocol byte = 11
 
-	maxMTUSize    = 1400
+	minMTUSize    = 576
+	maxMTUSize    = 1492
 	maxWindowSize = 2048
 )
 
@@ -32,7 +36,7 @@ type Conn struct {
 	closing atomic.Int64
 
 	conn   net.PacketConn
-	addr   net.Addr
+	raddr  net.Addr
 	limits bool
 
 	once              sync.Once
@@ -49,10 +53,10 @@ type Conn struct {
 	seq, orderIndex, messageIndex uint24
 	splitID                       uint32
 
-	// mtuSize is the MTU size of the connection. Packets longer than this size
+	// mtu is the MTU size of the connection. Packets longer than this size
 	// must be split into fragments for them to arrive at the client without
 	// losing bytes.
-	mtuSize uint16
+	mtu uint16
 
 	// splits is a map of slices indexed by split IDs. The length of each of the
 	// slices is equal to the split count, and packets are positioned in that
@@ -89,25 +93,33 @@ type Conn struct {
 	lastActivity atomic.Pointer[time.Time]
 }
 
-// newConn constructs a new connection specifically dedicated to the address
-// passed.
-func newConn(conn net.PacketConn, addr net.Addr, mtuSize uint16) *Conn {
-	return newConnWithLimits(conn, addr, mtuSize, true)
+// newListenerConn constructs a new connection for a Listener specifically
+// dedicated to the address passed.
+func newListenerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
+	return newConn(conn, raddr, mtu, true)
 }
 
-// newConnWithLimits returns a Conn for the net.Addr passed with a specific mtu
+// newDialerConn returns a Conn for the net.Addr passed with a specific mtu
 // size. The limits bool passed specifies if the connection should limit the
 // bounds of things such as the size of packets. This is generally recommended
 // for connections coming from a client.
-func newConnWithLimits(conn net.PacketConn, addr net.Addr, mtuSize uint16, limits bool) *Conn {
-	if mtuSize < 500 || mtuSize > 1500 {
-		mtuSize = maxMTUSize
+func newDialerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
+	c := newConn(conn, raddr, mtu, false)
+	c.close = func() {
+		_ = conn.Close()
 	}
+	return c
+}
+
+// newConn constructs a new connection specifically dedicated to the address
+// passed.
+func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, limits bool) *Conn {
+	mtu = min(max(mtu, minMTUSize), maxMTUSize)
 	c := &Conn{
-		addr:           addr,
+		raddr:          raddr,
 		conn:           conn,
+		mtu:            mtu,
 		limits:         limits,
-		mtuSize:        mtuSize,
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
@@ -116,7 +128,7 @@ func newConnWithLimits(conn net.PacketConn, addr net.Addr, mtuSize uint16, limit
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
 		retransmission: newRecoveryQueue(),
-		buf:            bytes.NewBuffer(make([]byte, 0, mtuSize)),
+		buf:            bytes.NewBuffer(make([]byte, 0, mtu)),
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 256)),
 		nackBuf:        bytes.NewBuffer(make([]byte, 0, 256)),
 	}
@@ -145,7 +157,7 @@ func (conn *Conn) startTicking() {
 			if i%2 == 0 {
 				// We send a connected ping to calculate the rtt and let the
 				// other side know we haven't timed out.
-				conn.sendPing()
+				_ = conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
 			}
 			if i%3 == 0 {
 				conn.checkResend(t)
@@ -225,12 +237,12 @@ func (conn *Conn) checkResend(now time.Time) {
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	select {
 	case <-conn.closed:
-		return 0, conn.wrap(net.ErrClosed, "write")
+		return 0, conn.error(net.ErrClosed, "write")
 	default:
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
 		n, err := conn.write(b)
-		return n, conn.wrap(err, "write")
+		return n, conn.error(err, "write")
 	}
 }
 
@@ -280,7 +292,7 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		}
 		pk.write(conn.buf)
 		// We then send the pk to the connection.
-		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
 			return 0, net.ErrClosed
 		}
 
@@ -303,13 +315,13 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case pk := <-conn.packets:
 		if len(b) < pk.Len() {
-			err = conn.wrap(errBufferTooSmall, "read")
+			err = conn.error(errBufferTooSmall, "read")
 		}
 		return copy(b, pk.Bytes()), err
 	case <-conn.closed:
-		return 0, conn.wrap(net.ErrClosed, "read")
+		return 0, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
-		return 0, conn.wrap(context.DeadlineExceeded, "read")
+		return 0, conn.error(context.DeadlineExceeded, "read")
 	}
 }
 
@@ -321,9 +333,9 @@ func (conn *Conn) ReadPacket() (b []byte, err error) {
 	case packet := <-conn.packets:
 		return packet.Bytes(), err
 	case <-conn.closed:
-		return nil, conn.wrap(net.ErrClosed, "read")
+		return nil, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
-		return nil, conn.wrap(context.DeadlineExceeded, "read")
+		return nil, conn.error(context.DeadlineExceeded, "read")
 	}
 }
 
@@ -351,7 +363,7 @@ func (conn *Conn) closeImmediately() {
 // RemoteAddr returns the remote address of the connection, meaning the address
 // this connection leads to.
 func (conn *Conn) RemoteAddr() net.Addr {
-	return conn.addr
+	return conn.raddr
 }
 
 // LocalAddr returns the local address of the connection, which is always the
@@ -397,11 +409,11 @@ func (conn *Conn) Latency() time.Duration {
 	return time.Duration(conn.rtt.Load() / 2)
 }
 
-// sendPing pings the connection, updating the rtt of the Conn if successful.
-func (conn *Conn) sendPing() {
-	b := bytes.NewBuffer(nil)
-	(&message.ConnectedPing{ClientTimestamp: timestamp()}).Write(b)
-	_, _ = conn.Write(b.Bytes())
+// send encodes an encoding.BinaryMarshaler and sends it.
+func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
+	b, _ := pk.MarshalBinary()
+	_, err := conn.Write(b)
+	return err
 }
 
 // packetPool is a sync.Pool used to pool packets that encapsulate their
@@ -430,7 +442,7 @@ const (
 // split splits a content buffer in smaller buffers so that they do not exceed
 // the MTU size that the connection holds.
 func (conn *Conn) split(b []byte) [][]byte {
-	maxSize := int(conn.mtuSize-packetAdditionalSize) - 28
+	maxSize := int(conn.mtu-packetAdditionalSize) - 28
 	contentLength := len(b)
 	if contentLength > maxSize {
 		// If the content size is bigger than the maximum size here, it means
@@ -445,12 +457,11 @@ func (conn *Conn) split(b []byte) [][]byte {
 		fragmentCount++
 	}
 	fragments := make([][]byte, fragmentCount)
-
-	buf := bytes.NewBuffer(b)
-	for i := 0; i < fragmentCount; i++ {
-		// Take a piece out of the content with the size of maxSize.
-		fragments[i] = buf.Next(maxSize)
+	for i := 0; i < fragmentCount-1; i++ {
+		fragments[i] = b[:maxSize]
+		b = b[maxSize:]
 	}
+	fragments[len(fragments)-1] = b
 	return fragments
 }
 
@@ -558,17 +569,15 @@ func (conn *Conn) receivePacket(packet *packet) error {
 // an error is returned. If the packet was not handled by RakNet, it is sent to
 // the packet channel.
 func (conn *Conn) handlePacket(b []byte) error {
-	buffer := bytes.NewBuffer(b)
-	id, err := buffer.ReadByte()
-	if err != nil {
-		return fmt.Errorf("error reading packet ID: %v", err)
+	if len(b) == 0 {
+		return errors.New("zero packet length")
 	}
 
-	switch id {
+	switch b[0] {
 	case message.IDConnectionRequest:
-		return conn.handleConnectionRequest(buffer)
+		return conn.handleConnectionRequest(b[1:])
 	case message.IDConnectionRequestAccepted:
-		return conn.handleConnectionRequestAccepted(buffer)
+		return conn.handleConnectionRequestAccepted(b[1:])
 	case message.IDNewIncomingConnection:
 		select {
 		case <-conn.connected:
@@ -576,22 +585,21 @@ func (conn *Conn) handlePacket(b []byte) error {
 			close(conn.connected)
 		}
 	case message.IDConnectedPing:
-		return conn.handleConnectedPing(buffer)
+		return conn.handleConnectedPing(b[1:])
 	case message.IDConnectedPong:
-		return conn.handleConnectedPong(buffer)
+		return conn.handleConnectedPong(b[1:])
 	case message.IDDisconnectNotification:
 		conn.closeImmediately()
 	case message.IDDetectLostConnections:
 		// Let the other end know the connection is still alive.
-		conn.sendPing()
+		_ = conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
 	default:
-		_ = buffer.UnreadByte()
 		// Insert the packet contents the packet queue could release in the
 		// channel so that Conn.Read() can get a hold of them, but always first
 		// try to escape if the connection was closed.
 		select {
 		case <-conn.closed:
-		case conn.packets <- buffer:
+		case conn.packets <- bytes.NewBuffer(b[1:]):
 		}
 	}
 	return nil
@@ -599,28 +607,25 @@ func (conn *Conn) handlePacket(b []byte) error {
 
 // handleConnectedPing handles a connected ping packet inside of buffer b. An
 // error is returned if the packet was invalid.
-func (conn *Conn) handleConnectedPing(b *bytes.Buffer) error {
-	packet := &message.ConnectedPing{}
-	if err := packet.Read(b); err != nil {
-		return fmt.Errorf("error reading connected ping: %v", err)
+func (conn *Conn) handleConnectedPing(b []byte) error {
+	pk := message.ConnectedPing{}
+	if err := pk.UnmarshalBinary(b); err != nil {
+		return fmt.Errorf("error reading connected ping: %w", err)
 	}
-	b.Reset()
 
 	// Respond with a connected pong that has the ping timestamp found in the
 	// connected ping, and our own timestamp for the pong timestamp.
-	(&message.ConnectedPong{ClientTimestamp: packet.ClientTimestamp, ServerTimestamp: timestamp()}).Write(b)
-	_, err := conn.Write(b.Bytes())
-	return err
+	return conn.send(&message.ConnectedPong{ClientTimestamp: pk.ClientTimestamp, ServerTimestamp: timestamp()})
 }
 
 // handleConnectedPong handles a connected pong packet inside of buffer b. An
 // error is returned if the packet was invalid.
-func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
-	packet := &message.ConnectedPong{}
-	if err := packet.Read(b); err != nil {
-		return fmt.Errorf("error reading connected pong: %v", err)
+func (conn *Conn) handleConnectedPong(b []byte) error {
+	pk := &message.ConnectedPong{}
+	if err := pk.UnmarshalBinary(b); err != nil {
+		return fmt.Errorf("error reading connected pong: %w", err)
 	}
-	if packet.ClientTimestamp > timestamp() {
+	if pk.ClientTimestamp > timestamp() {
 		return fmt.Errorf("error measuring rtt: ping timestamp is in the future")
 	}
 	// We don't actually use the ConnectedPong to measure rtt. It is too
@@ -630,26 +635,32 @@ func (conn *Conn) handleConnectedPong(b *bytes.Buffer) error {
 
 // handleConnectionRequest handles a connection request packet inside of buffer
 // b. An error is returned if the packet was invalid.
-func (conn *Conn) handleConnectionRequest(b *bytes.Buffer) error {
-	packet := &message.ConnectionRequest{}
-	if err := packet.Read(b); err != nil {
-		return fmt.Errorf("error reading connection request: %v", err)
+func (conn *Conn) handleConnectionRequest(b []byte) error {
+	pk := &message.ConnectionRequest{}
+	if err := pk.UnmarshalBinary(b); err != nil {
+		return fmt.Errorf("error reading connection request: %w", err)
 	}
-	b.Reset()
-	(&message.ConnectionRequestAccepted{ClientAddress: *conn.addr.(*net.UDPAddr), RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: timestamp()}).Write(b)
-	_, err := conn.Write(b.Bytes())
-	return err
+	return conn.send(&message.ConnectionRequestAccepted{ClientAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: timestamp()})
+}
+
+func resolve(addr net.Addr) netip.AddrPort {
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		uaddr := *udpAddr
+		ip, _ := netip.AddrFromSlice(uaddr.IP)
+		return netip.AddrPortFrom(ip, uint16(uaddr.Port))
+	}
+	return netip.AddrPort{}
 }
 
 // handleConnectionRequestAccepted handles a serialised connection request
 // accepted packet in b, and returns an error if not successful.
-func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
-	packet := &message.ConnectionRequestAccepted{}
-	_ = packet.Read(b)
-	b.Reset()
+func (conn *Conn) handleConnectionRequestAccepted(b []byte) error {
+	pk := &message.ConnectionRequestAccepted{}
+	if err := pk.UnmarshalBinary(b); err != nil {
+		return fmt.Errorf("error reading connection request accepted: %w", err)
+	}
 
-	(&message.NewIncomingConnection{ServerAddress: *conn.addr.(*net.UDPAddr), RequestTimestamp: packet.RequestTimestamp, AcceptedTimestamp: packet.AcceptedTimestamp, SystemAddresses: packet.SystemAddresses}).Write(b)
-	_, err := conn.Write(b.Bytes())
+	err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: pk.AcceptedTimestamp, SystemAddresses: pk.SystemAddresses})
 
 	select {
 	case <-conn.connected:
@@ -664,6 +675,7 @@ func (conn *Conn) handleConnectionRequestAccepted(b *bytes.Buffer) error {
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 256
+
 	if (p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount) && conn.limits {
 		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
 	}
@@ -723,14 +735,14 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 
 	for len(ack.packets) != 0 {
 		buf.WriteByte(bitflag | bitFlagDatagram)
-		n, err := ack.write(buf, conn.mtuSize)
+		n, err := ack.write(buf, conn.mtu)
 		if err != nil {
 			panic(fmt.Sprintf("error encoding ACK packet: %v", err))
 		}
 		// We managed to write n packets in the ACK with this MTU size, write
 		// the next of the packets in a new ACK.
 		ack.packets = ack.packets[n:]
-		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.addr); err != nil {
+		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.raddr); err != nil {
 			return fmt.Errorf("error sending ACK packet: %v", err)
 		}
 		buf.Reset()
@@ -798,8 +810,8 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		pk.write(conn.buf)
 
 		// We then send the pk to the connection.
-		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.addr); err != nil {
-			return fmt.Errorf("error sending pk to addr %v: %v", conn.addr, err)
+		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
+			return fmt.Errorf("error sending pk to raddr %v: %v", conn.raddr, err)
 		}
 		// We then re-add the pk to the recovery queue in case the new one gets
 		// lost too, in which case we need to resend it again.
@@ -807,14 +819,4 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		conn.buf.Reset()
 	}
 	return nil
-}
-
-// requestConnection requests the connection from the server, provided this
-// connection operates as a client. An error occurs if the request was not
-// successful.
-func (conn *Conn) requestConnection(id int64) error {
-	b := bytes.NewBuffer(nil)
-	(&message.ConnectionRequest{ClientGUID: id, RequestTimestamp: timestamp()}).Write(b)
-	_, err := conn.Write(b.Bytes())
-	return err
 }

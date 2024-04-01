@@ -1,10 +1,8 @@
 package message
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
-	"net"
+	"net/netip"
 )
 
 const (
@@ -31,65 +29,66 @@ const (
 // RakNet.
 var unconnectedMessageSequence = [16]byte{0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78}
 
-// writeAddr writes a UDP address to the buffer passed.
-func writeAddr(buffer *bytes.Buffer, addr net.UDPAddr) {
-	var ver byte = 6
-	if addr.IP.To4() != nil {
-		ver = 4
-	}
-	if addr.IP == nil {
-		addr.IP = make([]byte, 16)
-	}
-	_ = buffer.WriteByte(ver)
-	if ver == 4 {
-		ipBytes := addr.IP.To4()
+type systemAddresses [20]netip.AddrPort
 
-		_ = buffer.WriteByte(^ipBytes[0])
-		_ = buffer.WriteByte(^ipBytes[1])
-		_ = buffer.WriteByte(^ipBytes[2])
-		_ = buffer.WriteByte(^ipBytes[3])
-		_ = binary.Write(buffer, binary.BigEndian, uint16(addr.Port))
+// sizeOf returns the size in bytes of the system addresses.
+func (addresses systemAddresses) sizeOf() int {
+	size := 0
+	for _, addr := range addresses {
+		size += sizeofAddr(addr)
+	}
+	return size
+}
+
+// sizeOfAddr returns the size in bytes of an address.
+func sizeofAddr(addr netip.AddrPort) int {
+	if addr.Addr().Is4() {
+		return sizeofAddr4
+	}
+	return sizeofAddr6
+}
+
+const (
+	sizeofAddr4 = 1 + 4 + 2
+	sizeofAddr6 = 1 + 2 + 2 + 4 + 16 + 4
+)
+
+func putAddr(b []byte, addrPort netip.AddrPort) int {
+	addr, port := addrPort.Addr(), addrPort.Port()
+	if addr.Is4() {
+		ip4 := addr.As4()
+		b[0] = 4
+		copy(b[1:], ip4[:])
+		binary.BigEndian.PutUint16(b[5:], port)
+		return sizeofAddr4
 	} else {
-		_ = binary.Write(buffer, binary.LittleEndian, int16(23)) // syscall.AF_INET6 on Windows.
-		_ = binary.Write(buffer, binary.BigEndian, uint16(addr.Port))
-		// The IPv6 address is enclosed in two 0 integers.
-		_ = binary.Write(buffer, binary.BigEndian, int32(0))
-		_, _ = buffer.Write(addr.IP.To16())
-		_ = binary.Write(buffer, binary.BigEndian, int32(0))
+		ip16 := addr.As16()
+		b[0] = 6
+		// 2 bytes.
+		binary.BigEndian.PutUint16(b[3:], uint16(23)) // syscall.AF_INET6 on Windows.
+		binary.BigEndian.PutUint16(b[5:], port)
+		// 4 bytes.
+		copy(b[11:], ip16[:])
+		// 4 bytes.
+		return sizeofAddr6
 	}
 }
 
-// readAddr decodes a RakNet address from the buffer passed. If not successful, an error is returned.
-func readAddr(buffer *bytes.Buffer, addr *net.UDPAddr) error {
-	ver, err := buffer.ReadByte()
-	if err != nil {
-		return err
-	}
-	if ver == 4 {
-		ipBytes := make([]byte, 4)
-		if _, err := buffer.Read(ipBytes); err != nil {
-			return fmt.Errorf("error reading raknet address ipv4 bytes: %v", err)
-		}
-		// Construct an IPv4 out of the 4 bytes we just read.
-		addr.IP = net.IPv4((-ipBytes[0]-1)&0xff, (-ipBytes[1]-1)&0xff, (-ipBytes[2]-1)&0xff, (-ipBytes[3]-1)&0xff)
-		var port uint16
-		if err := binary.Read(buffer, binary.BigEndian, &port); err != nil {
-			return fmt.Errorf("error reading raknet address port: %v", err)
-		}
-		addr.Port = int(port)
+func addr(b []byte) (netip.AddrPort, int) {
+	if b[0] == 4 || b[0] == 0 {
+		ip := netip.AddrFrom4([4]byte{(-b[1] - 1) & 0xff, (-b[2] - 1) & 0xff, (-b[3] - 1) & 0xff, (-b[4] - 1) & 0xff})
+		port := binary.BigEndian.Uint16(b[5:])
+		return netip.AddrPortFrom(ip, port), sizeofAddr4
 	} else {
-		buffer.Next(2)
-		var port uint16
-		if err := binary.Read(buffer, binary.LittleEndian, &port); err != nil {
-			return fmt.Errorf("error reading raknet address port: %v", err)
-		}
-		addr.Port = int(port)
-		buffer.Next(4)
-		addr.IP = make([]byte, 16)
-		if _, err := buffer.Read(addr.IP); err != nil {
-			return fmt.Errorf("error reading raknet address ipv6 bytes: %v", err)
-		}
-		buffer.Next(4)
+		port := binary.BigEndian.Uint16(b[5:])
+		ip := netip.AddrFrom16([16]byte(b[11:]))
+		return netip.AddrPortFrom(ip, port), sizeofAddr6
 	}
-	return nil
+}
+
+func addrSize(b []byte) int {
+	if len(b) == 0 || b[0] == 4 || b[0] == 0 {
+		return sizeofAddr4
+	}
+	return sizeofAddr6
 }

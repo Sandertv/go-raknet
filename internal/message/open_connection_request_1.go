@@ -1,25 +1,28 @@
 package message
 
 import (
-	"bytes"
-	"encoding/binary"
+	"io"
 )
 
 type OpenConnectionRequest1 struct {
-	Magic                 [16]byte
 	Protocol              byte
 	MaximumSizeNotDropped uint16
 }
 
-func (pk *OpenConnectionRequest1) Write(buf *bytes.Buffer) {
-	_ = binary.Write(buf, binary.BigEndian, IDOpenConnectionRequest1)
-	_ = binary.Write(buf, binary.BigEndian, unconnectedMessageSequence)
-	_ = binary.Write(buf, binary.BigEndian, pk.Protocol)
-	_, _ = buf.Write(make([]byte, pk.MaximumSizeNotDropped-uint16(buf.Len()+28)))
+func (pk *OpenConnectionRequest1) MarshalBinary() (data []byte, err error) {
+	b := make([]byte, pk.MaximumSizeNotDropped-20-8) // IP Header: 20 bytes, UDP Header: 8 bytes.
+	b[0] = IDOpenConnectionRequest1
+	copy(b[1:], unconnectedMessageSequence[:])
+	b[17] = pk.Protocol
+	return b, nil
 }
 
-func (pk *OpenConnectionRequest1) Read(buf *bytes.Buffer) error {
-	pk.MaximumSizeNotDropped = uint16(buf.Len()+1) + 28
-	_ = binary.Read(buf, binary.BigEndian, &pk.Magic)
-	return binary.Read(buf, binary.BigEndian, &pk.Protocol)
+func (pk *OpenConnectionRequest1) UnmarshalBinary(data []byte) error {
+	if len(data) < 17 {
+		return io.ErrUnexpectedEOF
+	}
+	// Magic: 16 bytes.
+	pk.Protocol = data[16]
+	pk.MaximumSizeNotDropped = uint16(len(data) + 20 + 8 + 1) // Headers + packet ID.
+	return nil
 }

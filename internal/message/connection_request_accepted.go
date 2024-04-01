@@ -1,38 +1,55 @@
 package message
 
 import (
-	"bytes"
 	"encoding/binary"
-	"net"
+	"io"
+	"net/netip"
 )
 
 type ConnectionRequestAccepted struct {
-	ClientAddress     net.UDPAddr
-	SystemAddresses   [20]net.UDPAddr
+	ClientAddress     netip.AddrPort
+	SystemAddresses   systemAddresses
 	RequestTimestamp  int64
 	AcceptedTimestamp int64
 }
 
-func (pk *ConnectionRequestAccepted) Write(buf *bytes.Buffer) {
-	_ = binary.Write(buf, binary.BigEndian, IDConnectionRequestAccepted)
-	writeAddr(buf, pk.ClientAddress)
-	_ = binary.Write(buf, binary.BigEndian, int16(0))
-	for _, addr := range pk.SystemAddresses {
-		writeAddr(buf, addr)
+func (pk *ConnectionRequestAccepted) UnmarshalBinary(data []byte) error {
+	if len(data) < addrSize(data) {
+		return io.ErrUnexpectedEOF
 	}
-	_ = binary.Write(buf, binary.BigEndian, pk.RequestTimestamp)
-	_ = binary.Write(buf, binary.BigEndian, pk.AcceptedTimestamp)
-}
-
-func (pk *ConnectionRequestAccepted) Read(buf *bytes.Buffer) error {
-	_ = readAddr(buf, &pk.ClientAddress)
-	buf.Next(2)
+	var offset int
+	pk.ClientAddress, offset = addr(data)
+	offset += 2 // Zero int16.
 	for i := 0; i < 20; i++ {
-		_ = readAddr(buf, &pk.SystemAddresses[i])
-		if buf.Len() == 16 {
+		if len(data) < addrSize(data[offset:]) {
+			return io.ErrUnexpectedEOF
+		}
+		address, n := addr(data[offset:])
+		pk.SystemAddresses[i] = address
+		offset += n
+
+		if len(data[offset:]) == 16 {
+			// Some implementations send only 10 system addresses.
 			break
 		}
 	}
-	_ = binary.Read(buf, binary.BigEndian, &pk.RequestTimestamp)
-	return binary.Read(buf, binary.BigEndian, &pk.AcceptedTimestamp)
+	if len(data) < 16 {
+		return io.ErrUnexpectedEOF
+	}
+	pk.RequestTimestamp = int64(binary.BigEndian.Uint64(data[offset:]))
+	pk.AcceptedTimestamp = int64(binary.BigEndian.Uint64(data[offset+8:]))
+	return nil
+}
+
+func (pk *ConnectionRequestAccepted) MarshalBinary() (data []byte, err error) {
+	nAddr, nSys := sizeofAddr(pk.ClientAddress), pk.SystemAddresses.sizeOf()
+	b := make([]byte, 1+nAddr+2+nSys+16)
+	b[0] = IDConnectionRequestAccepted
+	offset := 1 + putAddr(b[1:], pk.ClientAddress) + 2 // Zero int16.
+	for _, addr := range pk.SystemAddresses {
+		offset += putAddr(b[offset:], addr)
+	}
+	binary.BigEndian.PutUint64(b[offset:], uint64(pk.RequestTimestamp))
+	binary.BigEndian.PutUint64(b[offset+8:], uint64(pk.AcceptedTimestamp))
+	return b, nil
 }

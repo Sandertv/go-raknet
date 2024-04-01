@@ -181,7 +181,7 @@ func (listener *Listener) listen() {
 // handle handles an incoming packet in buffer b from the address passed. If
 // not successful, an error is returned describing the issue.
 func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
-	value, found := listener.connections.Load(addr.String())
+	value, found := listener.connections.Load(resolve(addr))
 	if !found {
 		// If there was no session yet, it means the packet is an offline
 		// message. It is not contained in a datagram.
@@ -201,7 +201,7 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			// while it has already timed out. In this case, we should not print
 			// an error.
 			if packetID&bitFlagDatagram == 0 {
-				return fmt.Errorf("unknown packet received (%x): %x", packetID, b.Bytes())
+				return fmt.Errorf("unknown packet received (len=%v, id=%x): %x", b.Len(), packetID, b.Bytes())
 			}
 		}
 		return nil
@@ -221,31 +221,28 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 }
 
 // handleOpenConnectionRequest2 handles an open connection request 2 packet
-// stored in buffer b, coming from an address addr.
+// stored in buffer b, coming from an address raddr.
 func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net.Addr) error {
-	packet := &message.OpenConnectionRequest2{}
-	if err := packet.Read(b); err != nil {
+	pk := &message.OpenConnectionRequest2{}
+	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
 		return fmt.Errorf("error reading open connection request 2: %v", err)
 	}
 	b.Reset()
 
-	mtuSize := packet.ClientPreferredMTUSize
-	if mtuSize > maxMTUSize {
-		mtuSize = maxMTUSize
-	}
+	mtuSize := min(pk.ClientPreferredMTUSize, maxMTUSize)
 
-	(&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: *addr.(*net.UDPAddr), MTUSize: mtuSize}).Write(b)
-	if _, err := listener.conn.WriteTo(b.Bytes(), addr); err != nil {
+	data, _ := (&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: resolve(addr), MTUSize: mtuSize}).MarshalBinary()
+	if _, err := listener.conn.WriteTo(data, addr); err != nil {
 		return fmt.Errorf("error sending open connection reply 2: %v", err)
 	}
 
-	conn := newConn(listener.conn, addr, packet.ClientPreferredMTUSize)
+	conn := newListenerConn(listener.conn, addr, pk.ClientPreferredMTUSize)
 	conn.close = func() {
 		// Make sure to remove the connection from the Listener once the Conn is
 		// closed.
-		listener.connections.Delete(addr.String())
+		listener.connections.Delete(resolve(addr))
 	}
-	listener.connections.Store(addr.String(), conn)
+	listener.connections.Store(resolve(addr), conn)
 
 	go func() {
 		t := time.NewTimer(time.Second * 10)
@@ -268,40 +265,37 @@ func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net
 }
 
 // handleOpenConnectionRequest1 handles an open connection request 1 packet
-// stored in buffer b, coming from an address addr.
+// stored in buffer b, coming from an address raddr.
 func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net.Addr) error {
-	packet := &message.OpenConnectionRequest1{}
-	if err := packet.Read(b); err != nil {
+	pk := &message.OpenConnectionRequest1{}
+	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
 		return fmt.Errorf("error reading open connection request 1: %v", err)
 	}
 	b.Reset()
-	mtuSize := packet.MaximumSizeNotDropped
-	if mtuSize > maxMTUSize {
-		mtuSize = maxMTUSize
+	mtuSize := min(pk.MaximumSizeNotDropped, maxMTUSize)
+
+	if pk.Protocol != currentProtocol {
+		data, _ := (&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).MarshalBinary()
+		_, _ = listener.conn.WriteTo(data, addr)
+		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", pk.Protocol, currentProtocol)
 	}
 
-	if packet.Protocol != currentProtocol {
-		(&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).Write(b)
-		_, _ = listener.conn.WriteTo(b.Bytes(), addr)
-		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", packet.Protocol, currentProtocol)
-	}
-
-	(&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, ServerPreferredMTUSize: mtuSize}).Write(b)
-	_, err := listener.conn.WriteTo(b.Bytes(), addr)
+	data, _ := (&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, ServerPreferredMTUSize: mtuSize}).MarshalBinary()
+	_, err := listener.conn.WriteTo(data, addr)
 	return err
 }
 
 // handleUnconnectedPing handles an unconnected ping packet stored in buffer b,
-// coming from an address addr.
+// coming from an address raddr.
 func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) error {
 	pk := &message.UnconnectedPing{}
-	if err := pk.Read(b); err != nil {
+	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
 		return fmt.Errorf("error reading unconnected ping: %v", err)
 	}
 	b.Reset()
 
-	(&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: *listener.pongData.Load()}).Write(b)
-	_, err := listener.conn.WriteTo(b.Bytes(), addr)
+	data, _ := (&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: *listener.pongData.Load()}).MarshalBinary()
+	_, err := listener.conn.WriteTo(data, addr)
 	return err
 }
 
