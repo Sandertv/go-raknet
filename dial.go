@@ -332,7 +332,7 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 			if err := response.UnmarshalBinary(b[1:n]); err != nil {
 				return fmt.Errorf("read incompatible protocol version: %w", err)
 			}
-			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", currentProtocol, response.ServerProtocol)
+			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", protocolVersion, response.ServerProtocol)
 		}
 	}
 }
@@ -404,7 +404,7 @@ func (state *connState) request2(ctx context.Context) {
 // openConnectionRequest1 sends an open connection request 1 packet to the
 // server. If not successful, an error is returned.
 func (state *connState) openConnectionRequest1(mtu uint16) {
-	data, _ := (&message.OpenConnectionRequest1{Protocol: currentProtocol, MaximumSizeNotDropped: mtu}).MarshalBinary()
+	data, _ := (&message.OpenConnectionRequest1{Protocol: protocolVersion, MaximumSizeNotDropped: mtu}).MarshalBinary()
 	_, _ = state.conn.Write(data)
 }
 

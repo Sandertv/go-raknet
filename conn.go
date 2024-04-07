@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	// currentProtocol is the current RakNet protocol version. This is Minecraft
+	// protocolVersion is the current RakNet protocol version. This is Minecraft
 	// specific.
-	currentProtocol byte = 11
+	protocolVersion byte = 11
 
 	minMTUSize    = 576
 	maxMTUSize    = 1492
@@ -352,11 +352,11 @@ func (conn *Conn) Close() error {
 func (conn *Conn) closeImmediately() {
 	conn.once.Do(func() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
-		close(conn.closed)
 		if conn.close != nil {
 			conn.close()
 			conn.close = nil
 		}
+		close(conn.closed)
 	})
 }
 
@@ -472,10 +472,6 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 	if err != nil {
 		return fmt.Errorf("error reading datagram header flags: %v", err)
 	}
-	if headerFlags&bitFlagDatagram == 0 {
-		// Ignore packets that do not have the datagram bitflag.
-		return nil
-	}
 	t := time.Now()
 	conn.lastActivity.Store(&t)
 	switch {
@@ -483,7 +479,7 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 		return conn.handleACK(b)
 	case headerFlags&bitFlagNACK != 0:
 		return conn.handleNACK(b)
-	default:
+	case headerFlags&bitFlagDatagram != 0:
 		return conn.receiveDatagram(b)
 	}
 }
@@ -599,7 +595,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 		// try to escape if the connection was closed.
 		select {
 		case <-conn.closed:
-		case conn.packets <- bytes.NewBuffer(b[1:]):
+		case conn.packets <- bytes.NewBuffer(b):
 		}
 	}
 	return nil

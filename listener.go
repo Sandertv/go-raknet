@@ -185,11 +185,11 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 	if !found {
 		// If there was no session yet, it means the packet is an offline
 		// message. It is not contained in a datagram.
-		packetID, err := b.ReadByte()
+		id, err := b.ReadByte()
 		if err != nil {
 			return fmt.Errorf("error reading packet ID byte: %v", err)
 		}
-		switch packetID {
+		switch id {
 		case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
 			return listener.handleUnconnectedPing(b, addr)
 		case message.IDOpenConnectionRequest1:
@@ -200,8 +200,8 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 			// In some cases, the client will keep trying to send datagrams
 			// while it has already timed out. In this case, we should not print
 			// an error.
-			if packetID&bitFlagDatagram == 0 {
-				return fmt.Errorf("unknown packet received (len=%v, id=%x): %x", b.Len(), packetID, b.Bytes())
+			if id&bitFlagDatagram == 0 {
+				return fmt.Errorf("unknown packet received (len=%v, id=%x): %x", b.Len(), id, b.Bytes())
 			}
 		}
 		return nil
@@ -212,11 +212,11 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		// Connection was closed already.
 		return nil
 	default:
-		err := conn.receive(b)
-		if err != nil {
+		if err := conn.receive(b); err != nil {
 			conn.closeImmediately()
+			return err
 		}
-		return err
+		return nil
 	}
 }
 
@@ -274,10 +274,10 @@ func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net
 	b.Reset()
 	mtuSize := min(pk.MaximumSizeNotDropped, maxMTUSize)
 
-	if pk.Protocol != currentProtocol {
-		data, _ := (&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: currentProtocol}).MarshalBinary()
+	if pk.Protocol != protocolVersion {
+		data, _ := (&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: protocolVersion}).MarshalBinary()
 		_, _ = listener.conn.WriteTo(data, addr)
-		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", pk.Protocol, currentProtocol)
+		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", pk.Protocol, protocolVersion)
 	}
 
 	data, _ := (&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, ServerPreferredMTUSize: mtuSize}).MarshalBinary()

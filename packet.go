@@ -49,7 +49,7 @@ const (
 )
 
 // packet is an encapsulation around every packet sent after the connection is
-// established. It is
+// established.
 type packet struct {
 	reliability byte
 
