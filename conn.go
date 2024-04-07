@@ -671,10 +671,14 @@ func (conn *Conn) handleConnectionRequestAccepted(b []byte) error {
 // packet of its sequence, it will continue handling the full packet as it
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
-	const maxSplitCount = 256
+	const maxSplitCount = 128
+	const maxConcurrentSplits = 4
 
-	if (p.splitCount > maxSplitCount || len(conn.splits) > maxSplitCount) && conn.limits {
-		return fmt.Errorf("split count %v (%v active) exceeds the maximum %v", p.splitCount, len(conn.splits), maxSplitCount)
+	if p.splitCount > maxSplitCount && conn.limits {
+		return fmt.Errorf("split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
+	}
+	if len(conn.splits) > maxConcurrentSplits && conn.limits {
+		return fmt.Errorf("maximum concurrent splits %v reached", maxConcurrentSplits)
 	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
