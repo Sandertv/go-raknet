@@ -482,6 +482,7 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 	case headerFlags&bitFlagDatagram != 0:
 		return conn.receiveDatagram(b)
 	}
+	return nil
 }
 
 // receiveDatagram handles the receiving of a datagram found in buffer b. If
