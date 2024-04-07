@@ -526,14 +526,14 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 func (conn *Conn) handleDatagram(b *bytes.Buffer) error {
 	for b.Len() > 0 {
 		if err := conn.pk.read(b); err != nil {
-			return fmt.Errorf("error decoding datagram packet: %v", err)
+			return fmt.Errorf("handle datagram: decode packet: %v", err)
 		}
 		handle := conn.receivePacket
 		if conn.pk.split {
 			handle = conn.receiveSplitPacket
 		}
 		if err := handle(conn.pk); err != nil {
-			return fmt.Errorf("error handling packet in datagram: %v", err)
+			return fmt.Errorf("handle datagram: handle packet: %v", err)
 		}
 	}
 	return nil
@@ -732,10 +732,7 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 
 	for len(ack.packets) != 0 {
 		buf.WriteByte(bitflag | bitFlagDatagram)
-		n, err := ack.write(buf, conn.mtu)
-		if err != nil {
-			panic(fmt.Sprintf("error encoding ACK packet: %v", err))
-		}
+		n := ack.write(buf, conn.mtu)
 		// We managed to write n packets in the ACK with this MTU size, write
 		// the next of the packets in a new ACK.
 		ack.packets = ack.packets[n:]

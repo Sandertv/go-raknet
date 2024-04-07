@@ -2,7 +2,7 @@ package raknet
 
 import (
 	"bytes"
-	"fmt"
+	"io"
 )
 
 // uint24 represents an integer existing out of 3 bytes. It is actually a
@@ -11,20 +11,52 @@ type uint24 uint32
 
 // readUint24 reads 3 bytes from the buffer passed and combines it into a
 // uint24. If there were no 3 bytes to read, an error is returned.
-func readUint24(b *bytes.Buffer) (uint24, error) {
-	ba, _ := b.ReadByte()
-	bb, _ := b.ReadByte()
-	bc, err := b.ReadByte()
-	if err != nil {
-		return 0, fmt.Errorf("error reading uint24: %v", err)
+func readUint24(buf *bytes.Buffer) (uint24, error) {
+	b := make([]byte, 3)
+	if _, err := buf.Read(b); err != nil {
+		return 0, io.ErrUnexpectedEOF
 	}
-	return uint24(ba) | (uint24(bb) << 8) | (uint24(bc) << 16), nil
+	return uint24(b[0]) | (uint24(b[1]) << 8) | (uint24(b[2]) << 16), nil
+}
+
+func readUint16(buf *bytes.Buffer) (uint16, error) {
+	b := make([]byte, 2)
+	if _, err := buf.Read(b); err != nil {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return (uint16(b[0]) << 8) | uint16(b[1]), nil
+}
+
+func readUint32(buf *bytes.Buffer) (uint32, error) {
+	b := make([]byte, 4)
+	if _, err := buf.Read(b); err != nil {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return (uint32(b[0]) << 24) | (uint32(b[1]) << 16) | (uint32(b[2]) << 8) | uint32(b[3]), nil
 }
 
 // writeUint24 writes a uint24 to the buffer passed as 3 bytes. If not
 // successful, an error is returned.
-func writeUint24(b *bytes.Buffer, value uint24) {
-	b.WriteByte(byte(value))
-	b.WriteByte(byte(value >> 8))
-	b.WriteByte(byte(value >> 16))
+func writeUint24(b *bytes.Buffer, v uint24) {
+	b.Write([]byte{
+		byte(v),
+		byte(v >> 8),
+		byte(v >> 16),
+	})
+}
+
+func writeUint16(b *bytes.Buffer, v uint16) {
+	b.Write([]byte{
+		byte(v >> 8),
+		byte(v),
+	})
+}
+
+func writeUint32(b *bytes.Buffer, v uint32) {
+	b.Write([]byte{
+		byte(v >> 24),
+		byte(v >> 16),
+		byte(v >> 8),
+		byte(v),
+	})
 }
