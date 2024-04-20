@@ -10,32 +10,64 @@ import (
 
 type connectionHandler interface {
 	handle(conn *Conn, b []byte) (handled bool, err error)
-	packetLimits() bool
+	limitsEnabled() bool
+	close(conn *Conn)
 }
 
-type listenerConnectionHandler struct{}
+type listenerConnectionHandler struct{ l *Listener }
 
 var (
 	errUnexpectedCRA           = errors.New("unexpected CONNECTION_REQUEST_ACCEPTED packet")
 	errUnexpectedAdditionalNIC = errors.New("unexpected additional NEW_INCOMING_CONNECTION packet")
 )
 
-func (h *listenerConnectionHandler) handleUnconnected(l *Listener, b []byte, addr net.Addr) (handled bool, err error) {
+func (h *listenerConnectionHandler) handleUnconnected(b []byte, addr net.Addr) error {
 	switch b[0] {
 	case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
-		return true, handleUnconnectedPing(l, b[1:], addr)
+		return handleUnconnectedPing(h.l, b[1:], addr)
 	case message.IDOpenConnectionRequest1:
-		return true, handleOpenConnectionRequest1(l, b[1:], addr)
+		return handleOpenConnectionRequest1(h.l, b[1:], addr)
 	case message.IDOpenConnectionRequest2:
-		return true, handleOpenConnectionRequest2(l, b[1:], addr)
+		return handleOpenConnectionRequest2(h.l, b[1:], addr)
 	}
-	// In some cases, the client will keep trying to send datagrams
-	// while it has already timed out. In this case, we should not print
-	// an error.
 	if b[0]&bitFlagDatagram != 0 {
+		// In some cases, the client will keep trying to send datagrams
+		// while it has already timed out. In this case, we should not return
+		// an error.
+		return nil
+	}
+	return fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
+}
+
+func (h *listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err error) {
+	switch b[0] {
+	case message.IDConnectionRequest:
+		return true, handleConnectionRequest(conn, b[1:])
+	case message.IDConnectionRequestAccepted:
+		return true, errUnexpectedCRA
+	case message.IDNewIncomingConnection:
+		return true, handleNewIncomingConnection(conn)
+	case message.IDConnectedPing:
+		return true, handleConnectedPing(conn, b[1:])
+	case message.IDConnectedPong:
+		return true, handleConnectedPong(b[1:])
+	case message.IDDisconnectNotification:
+		conn.closeImmediately()
+		return true, nil
+	case message.IDDetectLostConnections:
+		// Let the other end know the connection is still alive.
+		return true, conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
+	default:
 		return false, nil
 	}
-	return true, fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
+}
+
+func (h *listenerConnectionHandler) limitsEnabled() bool {
+	return true
+}
+
+func (h *listenerConnectionHandler) close(conn *Conn) {
+	h.l.connections.Delete(resolve(conn.raddr))
 }
 
 // handleUnconnectedPing handles an unconnected ping packet stored in buffer b,
@@ -84,12 +116,7 @@ func handleOpenConnectionRequest2(listener *Listener, b []byte, addr net.Addr) e
 		return fmt.Errorf("send OPEN_CONNECTION_REPLY_2: %w", err)
 	}
 
-	conn := newListenerConn(listener.conn, addr, pk.ClientPreferredMTUSize)
-	conn.close = func() {
-		// Make sure to remove the connection from the Listener once the Conn is
-		// closed.
-		listener.connections.Delete(resolve(addr))
-	}
+	conn := newConn(listener.conn, addr, mtuSize, listener.h)
 	listener.connections.Store(resolve(addr), conn)
 
 	go func() {
@@ -112,38 +139,12 @@ func handleOpenConnectionRequest2(listener *Listener, b []byte, addr net.Addr) e
 	return nil
 }
 
-func (h *listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err error) {
-	switch b[0] {
-	case message.IDConnectionRequest:
-		return true, handleConnectionRequest(conn, b[1:])
-	case message.IDConnectionRequestAccepted:
-		return true, errUnexpectedCRA
-	case message.IDNewIncomingConnection:
-		return true, handleNewIncomingConnection(conn)
-	case message.IDConnectedPing:
-		return true, handleConnectedPing(conn, b[1:])
-	case message.IDConnectedPong:
-		return true, handleConnectedPong(b[1:])
-	case message.IDDisconnectNotification:
-		conn.closeImmediately()
-		return true, nil
-	case message.IDDetectLostConnections:
-		// Let the other end know the connection is still alive.
-		return true, conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
-	default:
-		return false, nil
-	}
-}
-
-func (h *listenerConnectionHandler) packetLimits() bool {
-	return true
-}
-
 type dialerConnectionHandler struct{}
 
 var (
-	errUnexpectedCR  = errors.New("unexpected CONNECTION_REQUEST packet")
-	errUnexpectedNIC = errors.New("unexpected NEW_INCOMING_CONNECTION packet")
+	errUnexpectedCR            = errors.New("unexpected CONNECTION_REQUEST packet")
+	errUnexpectedAdditionalCRA = errors.New("unexpected additional CONNECTION_REQUEST_ACCEPTED packet")
+	errUnexpectedNIC           = errors.New("unexpected NEW_INCOMING_CONNECTION packet")
 )
 
 func (h *dialerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err error) {
@@ -169,7 +170,11 @@ func (h *dialerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, er
 	}
 }
 
-func (h *dialerConnectionHandler) packetLimits() bool {
+func (h *dialerConnectionHandler) close(conn *Conn) {
+	_ = conn.conn.Close()
+}
+
+func (h *dialerConnectionHandler) limitsEnabled() bool {
 	return false
 }
 
@@ -180,7 +185,6 @@ func handleConnectedPing(conn *Conn, b []byte) error {
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read CONNECTED_PING: %w", err)
 	}
-
 	// Respond with a connected pong that has the ping timestamp found in the
 	// connected ping, and our own timestamp for the pong timestamp.
 	return conn.send(&message.ConnectedPong{ClientTimestamp: pk.ClientTimestamp, ServerTimestamp: timestamp()})
@@ -219,14 +223,13 @@ func handleConnectionRequestAccepted(conn *Conn, b []byte) error {
 		return fmt.Errorf("read CONNECTION_REQUEST_ACCEPTED: %w", err)
 	}
 
-	err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: pk.AcceptedTimestamp, SystemAddresses: pk.SystemAddresses})
-
 	select {
 	case <-conn.connected:
+		return errUnexpectedAdditionalCRA
 	default:
 		close(conn.connected)
 	}
-	return err
+	return conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: pk.AcceptedTimestamp, SystemAddresses: pk.SystemAddresses})
 }
 
 // handleNewIncomingConnection handles an incoming connection packet from the

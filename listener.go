@@ -2,14 +2,12 @@ package raknet
 
 import (
 	"fmt"
-	"github.com/sandertv/go-raknet/internal/message"
 	"log/slog"
 	"math"
 	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // UpstreamPacketListener allows for a custom PacketListener implementation.
@@ -32,6 +30,8 @@ type ListenConfig struct {
 // methods as those implemented by the TCPListener in the net package. Listener
 // implements the net.Listener interface.
 type Listener struct {
+	h *listenerConnectionHandler
+
 	once   sync.Once
 	closed chan struct{}
 
@@ -58,11 +58,7 @@ type Listener struct {
 }
 
 // listenerID holds the next ID to use for a Listener.
-var listenerID atomic.Int64
-
-func init() {
-	listenerID.Store(rand.New(rand.NewSource(time.Now().Unix())).Int63())
-}
+var listenerID = rand.Int63()
 
 // Listen listens on the address passed and returns a listener that may be used
 // to accept connections. If not successful, an error is returned. The address
@@ -86,8 +82,9 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		incoming: make(chan *Conn),
 		closed:   make(chan struct{}),
 		log:      slog.Default(),
-		id:       listenerID.Add(1),
+		id:       atomic.AddInt64(&listenerID, 1),
 	}
+	listener.h = &listenerConnectionHandler{l: listener}
 	if l.ErrorLog != nil {
 		listener.log = l.ErrorLog
 	}
@@ -141,7 +138,7 @@ func (listener *Listener) Close() error {
 // the function panics.
 func (listener *Listener) PongData(data []byte) {
 	if len(data) > math.MaxInt16 {
-		panic(fmt.Sprintf("error setting pong data: pong data must not be longer than %v", math.MaxInt16))
+		panic(fmt.Sprintf("pong data: must be no longer than %v bytes, got %v", math.MaxInt16, len(data)))
 	}
 	listener.pongData.Store(&data)
 }
@@ -177,24 +174,7 @@ func (listener *Listener) listen() {
 func (listener *Listener) handle(b []byte, addr net.Addr) error {
 	value, found := listener.connections.Load(resolve(addr))
 	if !found {
-		// If there was no session yet, it means the packet is an offline
-		// message. It is not wrapped in a datagram.
-		switch b[0] {
-		case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
-			return handleUnconnectedPing(listener, b[1:], addr)
-		case message.IDOpenConnectionRequest1:
-			return handleOpenConnectionRequest1(listener, b[1:], addr)
-		case message.IDOpenConnectionRequest2:
-			return handleOpenConnectionRequest2(listener, b[1:], addr)
-		default:
-			// In some cases, the client will keep trying to send datagrams
-			// while it has already timed out. In this case, we should not print
-			// an error.
-			if b[0]&bitFlagDatagram == 0 {
-				return fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
-			}
-		}
-		return nil
+		return listener.h.handleUnconnected(b, addr)
 	}
 	conn := value.(*Conn)
 	select {

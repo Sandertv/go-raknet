@@ -179,7 +179,7 @@ func (dialer Dialer) dial(ctx context.Context, address string) (net.Conn, error)
 }
 
 // dialerID is a counter used to produce an ID for the client.
-var dialerID = rand.New(rand.NewSource(time.Now().Unix())).Int63()
+var dialerID = rand.Int63()
 
 // Dial attempts to dial a RakNet connection to the address passed. The address
 // may be either an IP address or a hostname, combined with a port that is
@@ -230,7 +230,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 }
 
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newDialerConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu)
+	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, &dialerConnectionHandler{})
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTimestamp: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}

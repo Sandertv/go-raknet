@@ -42,7 +42,6 @@ type Conn struct {
 
 	once              sync.Once
 	closed, connected chan struct{}
-	close             func()
 
 	mu  sync.Mutex
 	buf *bytes.Buffer
@@ -80,7 +79,7 @@ type Conn struct {
 	packetQueue *packetQueue
 	// packets is a channel containing content of packets that were fully
 	// processed. Calling Conn.Read() consumes a value from this channel.
-	packets chan *bytes.Buffer
+	packets chan []byte
 
 	// retransmission is a queue filled with packets that were sent with a given
 	// datagram sequence number.
@@ -92,24 +91,6 @@ type Conn struct {
 	readDeadline <-chan time.Time
 
 	lastActivity atomic.Pointer[time.Time]
-}
-
-// newListenerConn constructs a new connection for a Listener specifically
-// dedicated to the address passed.
-func newListenerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
-	return newConn(conn, raddr, mtu, &listenerConnectionHandler{})
-}
-
-// newDialerConn returns a Conn for the net.Addr passed with a specific mtu
-// size. The limits bool passed specifies if the connection should limit the
-// bounds of things such as the size of packets. This is generally recommended
-// for connections coming from a client.
-func newDialerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
-	c := newConn(conn, raddr, mtu, &dialerConnectionHandler{})
-	c.close = func() {
-		_ = conn.Close()
-	}
-	return c
 }
 
 // newConn constructs a new connection specifically dedicated to the address
@@ -124,7 +105,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
-		packets:        make(chan *bytes.Buffer, 512),
+		packets:        make(chan []byte, 512),
 		splits:         make(map[uint16][][]byte),
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
@@ -162,8 +143,7 @@ func (conn *Conn) startTicking() {
 			i++
 			conn.flushACKs()
 			if i%2 == 0 {
-				// We send a connected ping to calculate the rtt and let the
-				// other side know we haven't timed out.
+				// Ping the other end periodically to prevent timeouts.
 				_ = conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
 			}
 			if i%3 == 0 {
@@ -184,7 +164,7 @@ func (conn *Conn) startTicking() {
 				conn.mu.Unlock()
 
 				if before != 0 && acksLeft == 0 {
-					_ = conn.Close()
+					conn.closeImmediately()
 				}
 
 				since := time.Since(time.Unix(unix, 0))
@@ -268,13 +248,6 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		conn.splitID++
 	}
 	for splitIndex, content := range fragments {
-		sequenceNumber := conn.seq
-		conn.seq++
-		messageIndex := conn.messageIndex
-		conn.messageIndex++
-
-		conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
-		writeUint24(conn.buf, sequenceNumber)
 		pk := packetPool.Get().(*packet)
 		if cap(pk.content) < len(content) {
 			pk.content = make([]byte, len(content))
@@ -286,7 +259,8 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		copy(pk.content, content)
 
 		pk.orderIndex = orderIndex
-		pk.messageIndex = messageIndex
+		pk.messageIndex = conn.messageIndex
+		conn.messageIndex++
 
 		if pk.split = len(fragments) > 1; pk.split {
 			// If there were more than one fragment, the pk was split, so we
@@ -295,21 +269,12 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 			pk.splitIndex = uint32(splitIndex)
 			pk.splitID = splitID
 		}
-		pk.write(conn.buf)
-		// We then send the pk to the connection.
-		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
-			return 0, net.ErrClosed
+		if err = conn.sendDatagram(pk); err != nil {
+			return 0, err
 		}
-
-		// We reset the buffer so that we can re-use it for each fragment
-		// created when splitting the packet.
-		conn.buf.Reset()
-
-		// Finally we add the pk to the recovery queue.
-		conn.retransmission.add(sequenceNumber, pk)
 		n += len(content)
 	}
-	return
+	return n, nil
 }
 
 // Read reads from the connection into the byte slice passed. If successful,
@@ -319,10 +284,10 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case pk := <-conn.packets:
-		if len(b) < pk.Len() {
+		if len(b) < len(pk) {
 			err = conn.error(errBufferTooSmall, "read")
 		}
-		return copy(b, pk.Bytes()), err
+		return copy(b, pk), err
 	case <-conn.closed:
 		return 0, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
@@ -335,8 +300,8 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 // is closed or the read times out, in which case an error is returned.
 func (conn *Conn) ReadPacket() (b []byte, err error) {
 	select {
-	case packet := <-conn.packets:
-		return packet.Bytes(), err
+	case pk := <-conn.packets:
+		return pk, err
 	case <-conn.closed:
 		return nil, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
@@ -357,10 +322,7 @@ func (conn *Conn) Close() error {
 func (conn *Conn) closeImmediately() {
 	conn.once.Do(func() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
-		if conn.close != nil {
-			conn.close()
-			conn.close = nil
-		}
+		conn.handler.close(conn)
 		close(conn.closed)
 	})
 }
@@ -477,7 +439,7 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 			}
 		}
 	}
-	if conn.win.size() > maxWindowSize && conn.handler.packetLimits() {
+	if conn.win.size() > maxWindowSize && conn.handler.limitsEnabled() {
 		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
 	return conn.handleDatagram(b[3:])
@@ -515,7 +477,7 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// An ordered packet arrived twice.
 		return nil
 	}
-	if conn.packetQueue.WindowSize() > maxWindowSize && conn.handler.packetLimits() {
+	if conn.packetQueue.WindowSize() > maxWindowSize && conn.handler.limitsEnabled() {
 		return fmt.Errorf("packet queue window size is too big (%v-%v)", conn.packetQueue.lowest, conn.packetQueue.highest)
 	}
 	for _, content := range conn.packetQueue.fetch() {
@@ -545,7 +507,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 		// try to escape if the connection was closed.
 		select {
 		case <-conn.closed:
-		case conn.packets <- bytes.NewBuffer(b):
+		case conn.packets <- b:
 		}
 	}
 	return nil
@@ -567,10 +529,10 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 512
 	const maxConcurrentSplits = 4
 
-	if p.splitCount > maxSplitCount && conn.handler.packetLimits() {
+	if p.splitCount > maxSplitCount && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
 	}
-	if len(conn.splits) > maxConcurrentSplits && conn.handler.packetLimits() {
+	if len(conn.splits) > maxConcurrentSplits && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: maximum concurrent splits %v reached", maxConcurrentSplits)
 	}
 	m, ok := conn.splits[p.splitID]
@@ -588,7 +550,8 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	size := 0
 	for _, fragment := range m {
 		if len(fragment) == 0 {
-			// We haven't yet received all split fragments, so we cannot add the packets together yet.
+			// We haven't yet received all split fragments, so we cannot add the
+			// packets together yet.
 			return nil
 		}
 		// First we calculate the total size required to hold the content of the
@@ -684,29 +647,32 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
 		pk, ok := conn.retransmission.retransmit(sequenceNumber)
 		if !ok {
-			// We could not resend this datagram. Maybe it was already resent
-			// before at the request of the client. This is generally expected
-			// so we just continue.
 			continue
 		}
-
-		// We first write a new datagram header using a new send sequence number
-		// that we find.
-		conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
-		newSeqNum := conn.seq
-		conn.seq++
-		writeUint24(conn.buf, newSeqNum)
-		pk.write(conn.buf)
-
-		// We then send the pk to the connection.
-		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
-			return fmt.Errorf("resend: write to connection %v: %v", conn.raddr, err)
+		if err = conn.sendDatagram(pk); err != nil {
+			return err
 		}
-		// We then re-add the pk to the recovery queue in case the new one gets
-		// lost too, in which case we need to resend it again.
-		conn.retransmission.add(newSeqNum, pk)
-		conn.buf.Reset()
 	}
+	return nil
+}
+
+// sendDatagram sends a datagram over the connection that includes the packet
+// passed. It is assigned a new sequence number and added to the retransmission.
+func (conn *Conn) sendDatagram(pk *packet) error {
+	conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
+	newSeqNum := conn.seq
+	conn.seq++
+	writeUint24(conn.buf, newSeqNum)
+	pk.write(conn.buf)
+
+	// We then send the pk to the connection.
+	if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
+		return fmt.Errorf("send datagram: write to %v: %v", conn.raddr, err)
+	}
+	// We then re-add the pk to the recovery queue in case the new one gets
+	// lost too, in which case we need to resend it again.
+	conn.retransmission.add(newSeqNum, pk)
+	conn.buf.Reset()
 	return nil
 }
 
