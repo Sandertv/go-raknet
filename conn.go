@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -35,9 +36,9 @@ type Conn struct {
 
 	closing atomic.Int64
 
-	conn   net.PacketConn
-	raddr  net.Addr
-	limits bool
+	conn    net.PacketConn
+	raddr   net.Addr
+	handler connectionHandler
 
 	once              sync.Once
 	closed, connected chan struct{}
@@ -96,7 +97,7 @@ type Conn struct {
 // newListenerConn constructs a new connection for a Listener specifically
 // dedicated to the address passed.
 func newListenerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
-	return newConn(conn, raddr, mtu, true)
+	return newConn(conn, raddr, mtu, &listenerConnectionHandler{})
 }
 
 // newDialerConn returns a Conn for the net.Addr passed with a specific mtu
@@ -104,7 +105,7 @@ func newListenerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
 // bounds of things such as the size of packets. This is generally recommended
 // for connections coming from a client.
 func newDialerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
-	c := newConn(conn, raddr, mtu, false)
+	c := newConn(conn, raddr, mtu, &dialerConnectionHandler{})
 	c.close = func() {
 		_ = conn.Close()
 	}
@@ -113,13 +114,13 @@ func newDialerConn(conn net.PacketConn, raddr net.Addr, mtu uint16) *Conn {
 
 // newConn constructs a new connection specifically dedicated to the address
 // passed.
-func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, limits bool) *Conn {
+func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler) *Conn {
 	mtu = min(max(mtu, minMTUSize), maxMTUSize)
 	c := &Conn{
 		raddr:          raddr,
 		conn:           conn,
 		mtu:            mtu,
-		limits:         limits,
+		handler:        h,
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
@@ -136,6 +137,12 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, limits bool) *Conn
 	c.lastActivity.Store(&t)
 	go c.startTicking()
 	return c
+}
+
+// effectiveMTU returns the mtu size without the space allocated for IP and
+// UDP headers (28 bytes).
+func (conn *Conn) effectiveMTU() uint16 {
+	return conn.mtu - 28
 }
 
 // startTicking makes the connection start ticking, sending ACKs and pings to
@@ -252,13 +259,12 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 // simultaneously from multiple goroutines, but will write one by one. Unlike
 // Write, write will not lock.
 func (conn *Conn) write(b []byte) (n int, err error) {
-	fragments := conn.split(b)
+	fragments := split(b, conn.effectiveMTU())
 	orderIndex := conn.orderIndex
 	conn.orderIndex++
 
 	splitID := uint16(conn.splitID)
-	split := len(fragments) > 1
-	if split {
+	if len(fragments) > 1 {
 		conn.splitID++
 	}
 	for splitIndex, content := range fragments {
@@ -282,8 +288,7 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		pk.orderIndex = orderIndex
 		pk.messageIndex = messageIndex
 
-		pk.split = split
-		if split {
+		if pk.split = len(fragments) > 1; pk.split {
 			// If there were more than one fragment, the pk was split, so we
 			// need to make sure we set the appropriate fields.
 			pk.splitCount = uint32(len(fragments))
@@ -424,63 +429,19 @@ var packetPool = sync.Pool{
 	},
 }
 
-const (
-	// Datagram header +
-	// Datagram sequence number +
-	// Packet header +
-	// Packet content length +
-	// Packet message index +
-	// Packet order index +
-	// Packet order channel
-	packetAdditionalSize = 1 + 3 + 1 + 2 + 3 + 3 + 1
-	// Packet split count +
-	// Packet split ID +
-	// Packet split index
-	splitAdditionalSize = 4 + 2 + 4
-)
-
-// split splits a content buffer in smaller buffers so that they do not exceed
-// the MTU size that the connection holds.
-func (conn *Conn) split(b []byte) [][]byte {
-	maxSize := int(conn.mtu-packetAdditionalSize) - 28
-	contentLength := len(b)
-	if contentLength > maxSize {
-		// If the content size is bigger than the maximum size here, it means
-		// the packet will get split. This means that the packet will get even
-		// bigger because a split packet uses 4 + 2 + 4 more bytes.
-		maxSize -= splitAdditionalSize
-	}
-	fragmentCount := contentLength / maxSize
-	if contentLength%maxSize != 0 {
-		// If the content length can't be divided by maxSize perfectly, we need
-		// to reserve another fragment for the last bit of the packet.
-		fragmentCount++
-	}
-	fragments := make([][]byte, fragmentCount)
-	for i := 0; i < fragmentCount-1; i++ {
-		fragments[i] = b[:maxSize]
-		b = b[maxSize:]
-	}
-	fragments[len(fragments)-1] = b
-	return fragments
-}
-
 // receive receives a packet from the connection, handling it as appropriate.
 // If not successful, an error is returned.
-func (conn *Conn) receive(b *bytes.Buffer) error {
-	headerFlags, err := b.ReadByte()
-	if err != nil {
-		return fmt.Errorf("error reading datagram header flags: %v", err)
-	}
+func (conn *Conn) receive(b []byte) error {
 	t := time.Now()
 	conn.lastActivity.Store(&t)
+
 	switch {
-	case headerFlags&bitFlagACK != 0:
-		return conn.handleACK(b)
-	case headerFlags&bitFlagNACK != 0:
-		return conn.handleNACK(b)
-	case headerFlags&bitFlagDatagram != 0:
-		return conn.receiveDatagram(b)
+	case b[0]&bitFlagACK != 0:
+		return conn.handleACK(b[1:])
+	case b[0]&bitFlagNACK != 0:
+		return conn.handleNACK(b[1:])
+	case b[0]&bitFlagDatagram != 0:
+		return conn.receiveDatagram(b[1:])
 	}
 	return nil
 }
@@ -488,11 +449,11 @@ func (conn *Conn) receive(b *bytes.Buffer) error {
 // receiveDatagram handles the receiving of a datagram found in buffer b. If
 // successful, all packets inside the datagram are handled. if not, an error is
 // returned.
-func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
-	seq, err := readUint24(b)
-	if err != nil {
-		return fmt.Errorf("error reading datagram sequence number: %v", err)
+func (conn *Conn) receiveDatagram(b []byte) error {
+	if len(b) < 3 {
+		return fmt.Errorf("read datagram: %w", io.ErrUnexpectedEOF)
 	}
+	seq := loadUint24(b)
 	conn.ackMu.Lock()
 	// Add this sequence number to the received datagrams, so that it is
 	// included in an ACK.
@@ -511,29 +472,32 @@ func (conn *Conn) receiveDatagram(b *bytes.Buffer) error {
 		// packets.
 		rtt := time.Duration(conn.rtt.Load())
 		if missing := conn.win.missing(rtt + rtt/2); len(missing) > 0 {
-			if err = conn.sendNACK(missing); err != nil {
-				return fmt.Errorf("error sending NACK to request datagrams: %v", err)
+			if err := conn.sendNACK(missing); err != nil {
+				return fmt.Errorf("receive datagram: send NACK: %v", err)
 			}
 		}
 	}
-	if conn.win.size() > maxWindowSize && conn.limits {
-		return fmt.Errorf("datagram receive queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
+	if conn.win.size() > maxWindowSize && conn.handler.packetLimits() {
+		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
-	return conn.handleDatagram(b)
+	return conn.handleDatagram(b[3:])
 }
 
 // handleDatagram handles the contents of a datagram encoded in a bytes.Buffer.
-func (conn *Conn) handleDatagram(b *bytes.Buffer) error {
-	for b.Len() > 0 {
-		if err := conn.pk.read(b); err != nil {
-			return fmt.Errorf("handle datagram: decode packet: %v", err)
+func (conn *Conn) handleDatagram(b []byte) error {
+	for len(b) > 0 {
+		n, err := conn.pk.read(b)
+		if err != nil {
+			return fmt.Errorf("handle datagram: read packet: %v", err)
 		}
+		b = b[n:]
+
 		handle := conn.receivePacket
 		if conn.pk.split {
 			handle = conn.receiveSplitPacket
 		}
 		if err := handle(conn.pk); err != nil {
-			return fmt.Errorf("handle datagram: handle packet: %v", err)
+			return fmt.Errorf("handle datagram: receive packet: %v", err)
 		}
 	}
 	return nil
@@ -551,46 +515,31 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// An ordered packet arrived twice.
 		return nil
 	}
-	if conn.packetQueue.WindowSize() > maxWindowSize && conn.limits {
+	if conn.packetQueue.WindowSize() > maxWindowSize && conn.handler.packetLimits() {
 		return fmt.Errorf("packet queue window size is too big (%v-%v)", conn.packetQueue.lowest, conn.packetQueue.highest)
 	}
 	for _, content := range conn.packetQueue.fetch() {
 		if err := conn.handlePacket(content); err != nil {
-			return fmt.Errorf("error handling packet: %v", err)
+			return err
 		}
 	}
 	return nil
 }
+
+var errZeroPacket = errors.New("handle packet: zero packet length")
 
 // handlePacket handles a packet serialised in byte slice b. If not successful,
 // an error is returned. If the packet was not handled by RakNet, it is sent to
 // the packet channel.
 func (conn *Conn) handlePacket(b []byte) error {
 	if len(b) == 0 {
-		return errors.New("zero packet length")
+		return errZeroPacket
 	}
-
-	switch b[0] {
-	case message.IDConnectionRequest:
-		return conn.handleConnectionRequest(b[1:])
-	case message.IDConnectionRequestAccepted:
-		return conn.handleConnectionRequestAccepted(b[1:])
-	case message.IDNewIncomingConnection:
-		select {
-		case <-conn.connected:
-		default:
-			close(conn.connected)
-		}
-	case message.IDConnectedPing:
-		return conn.handleConnectedPing(b[1:])
-	case message.IDConnectedPong:
-		return conn.handleConnectedPong(b[1:])
-	case message.IDDisconnectNotification:
-		conn.closeImmediately()
-	case message.IDDetectLostConnections:
-		// Let the other end know the connection is still alive.
-		_ = conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
-	default:
+	handled, err := conn.handler.handle(conn, b)
+	if err != nil {
+		return fmt.Errorf("handle packet: %w", err)
+	}
+	if !handled {
 		// Insert the packet contents the packet queue could release in the
 		// channel so that Conn.Read() can get a hold of them, but always first
 		// try to escape if the connection was closed.
@@ -602,44 +551,6 @@ func (conn *Conn) handlePacket(b []byte) error {
 	return nil
 }
 
-// handleConnectedPing handles a connected ping packet inside of buffer b. An
-// error is returned if the packet was invalid.
-func (conn *Conn) handleConnectedPing(b []byte) error {
-	pk := message.ConnectedPing{}
-	if err := pk.UnmarshalBinary(b); err != nil {
-		return fmt.Errorf("error reading connected ping: %w", err)
-	}
-
-	// Respond with a connected pong that has the ping timestamp found in the
-	// connected ping, and our own timestamp for the pong timestamp.
-	return conn.send(&message.ConnectedPong{ClientTimestamp: pk.ClientTimestamp, ServerTimestamp: timestamp()})
-}
-
-// handleConnectedPong handles a connected pong packet inside of buffer b. An
-// error is returned if the packet was invalid.
-func (conn *Conn) handleConnectedPong(b []byte) error {
-	pk := &message.ConnectedPong{}
-	if err := pk.UnmarshalBinary(b); err != nil {
-		return fmt.Errorf("error reading connected pong: %w", err)
-	}
-	if pk.ClientTimestamp > timestamp() {
-		return fmt.Errorf("error measuring rtt: ping timestamp is in the future")
-	}
-	// We don't actually use the ConnectedPong to measure rtt. It is too
-	// unreliable and doesn't give a good idea of the connection quality.
-	return nil
-}
-
-// handleConnectionRequest handles a connection request packet inside of buffer
-// b. An error is returned if the packet was invalid.
-func (conn *Conn) handleConnectionRequest(b []byte) error {
-	pk := &message.ConnectionRequest{}
-	if err := pk.UnmarshalBinary(b); err != nil {
-		return fmt.Errorf("error reading connection request: %w", err)
-	}
-	return conn.send(&message.ConnectionRequestAccepted{ClientAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: timestamp()})
-}
-
 func resolve(addr net.Addr) netip.AddrPort {
 	if udpAddr, ok := addr.(*net.UDPAddr); ok {
 		uaddr := *udpAddr
@@ -649,24 +560,6 @@ func resolve(addr net.Addr) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-// handleConnectionRequestAccepted handles a serialised connection request
-// accepted packet in b, and returns an error if not successful.
-func (conn *Conn) handleConnectionRequestAccepted(b []byte) error {
-	pk := &message.ConnectionRequestAccepted{}
-	if err := pk.UnmarshalBinary(b); err != nil {
-		return fmt.Errorf("error reading connection request accepted: %w", err)
-	}
-
-	err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: pk.AcceptedTimestamp, SystemAddresses: pk.SystemAddresses})
-
-	select {
-	case <-conn.connected:
-	default:
-		close(conn.connected)
-	}
-	return err
-}
-
 // receiveSplitPacket handles a passed split packet. If it is the last split
 // packet of its sequence, it will continue handling the full packet as it
 // otherwise would. An error is returned if the packet was not valid.
@@ -674,11 +567,11 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 512
 	const maxConcurrentSplits = 4
 
-	if p.splitCount > maxSplitCount && conn.limits {
-		return fmt.Errorf("split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
+	if p.splitCount > maxSplitCount && conn.handler.packetLimits() {
+		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
 	}
-	if len(conn.splits) > maxConcurrentSplits && conn.limits {
-		return fmt.Errorf("maximum concurrent splits %v reached", maxConcurrentSplits)
+	if len(conn.splits) > maxConcurrentSplits && conn.handler.packetLimits() {
+		return fmt.Errorf("split packet: maximum concurrent splits %v reached", maxConcurrentSplits)
 	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
@@ -688,7 +581,7 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	if p.splitIndex > uint32(len(m)-1) {
 		// The split index was either negative or was bigger than the slice
 		// size, meaning the packet is invalid.
-		return fmt.Errorf("error handing split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(m)-1)
+		return fmt.Errorf("split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(m)-1)
 	}
 	m[p.splitIndex] = p.content
 
@@ -736,12 +629,12 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 
 	for len(ack.packets) != 0 {
 		buf.WriteByte(bitflag | bitFlagDatagram)
-		n := ack.write(buf, conn.mtu)
+		n := ack.write(buf, conn.effectiveMTU())
 		// We managed to write n packets in the ACK with this MTU size, write
 		// the next of the packets in a new ACK.
 		ack.packets = ack.packets[n:]
 		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.raddr); err != nil {
-			return fmt.Errorf("error sending ACK packet: %v", err)
+			return fmt.Errorf("send acknowlegement: %v", err)
 		}
 		buf.Reset()
 	}
@@ -751,13 +644,13 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 // handleACK handles an acknowledgement packet from the other end of the
 // connection. These mean that a datagram was successfully received by the
 // other end.
-func (conn *Conn) handleACK(b *bytes.Buffer) error {
+func (conn *Conn) handleACK(b []byte) error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 
 	ack := &acknowledgement{}
 	if err := ack.read(b); err != nil {
-		return fmt.Errorf("error reading ACK: %v", err)
+		return fmt.Errorf("read ACK: %v", err)
 	}
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
@@ -774,13 +667,13 @@ func (conn *Conn) handleACK(b *bytes.Buffer) error {
 
 // handleNACK handles a negative acknowledgment packet from the other end of
 // the connection. These mean that a datagram was found missing.
-func (conn *Conn) handleNACK(b *bytes.Buffer) error {
+func (conn *Conn) handleNACK(b []byte) error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 
 	nack := &acknowledgement{}
 	if err := nack.read(b); err != nil {
-		return fmt.Errorf("error reading NACK: %v", err)
+		return fmt.Errorf("read NACK: %v", err)
 	}
 	return conn.resend(nack.packets)
 }
@@ -799,9 +692,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 
 		// We first write a new datagram header using a new send sequence number
 		// that we find.
-		if err := conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS); err != nil {
-			return fmt.Errorf("error writing recovered datagram header: %v", err)
-		}
+		conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
 		newSeqNum := conn.seq
 		conn.seq++
 		writeUint24(conn.buf, newSeqNum)
@@ -809,7 +700,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 
 		// We then send the pk to the connection.
 		if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
-			return fmt.Errorf("error sending pk to raddr %v: %v", conn.raddr, err)
+			return fmt.Errorf("resend: write to connection %v: %v", conn.raddr, err)
 		}
 		// We then re-add the pk to the recovery queue in case the new one gets
 		// lost too, in which case we need to resend it again.
@@ -817,4 +708,9 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 		conn.buf.Reset()
 	}
 	return nil
+}
+
+// timestamp returns a timestamp in milliseconds.
+func timestamp() int64 {
+	return time.Now().UnixNano() / int64(time.Second)
 }

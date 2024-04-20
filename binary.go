@@ -16,23 +16,12 @@ func readUint24(buf *bytes.Buffer) (uint24, error) {
 	if _, err := buf.Read(b); err != nil {
 		return 0, io.ErrUnexpectedEOF
 	}
-	return uint24(b[0]) | (uint24(b[1]) << 8) | (uint24(b[2]) << 16), nil
+	return loadUint24(b), nil
 }
 
-func readUint16(buf *bytes.Buffer) (uint16, error) {
-	b := make([]byte, 2)
-	if _, err := buf.Read(b); err != nil {
-		return 0, io.ErrUnexpectedEOF
-	}
-	return (uint16(b[0]) << 8) | uint16(b[1]), nil
-}
-
-func readUint32(buf *bytes.Buffer) (uint32, error) {
-	b := make([]byte, 4)
-	if _, err := buf.Read(b); err != nil {
-		return 0, io.ErrUnexpectedEOF
-	}
-	return (uint32(b[0]) << 24) | (uint32(b[1]) << 16) | (uint32(b[2]) << 8) | uint32(b[3]), nil
+// loadUint24 interprets the first 3 bytes in b as a uint24.
+func loadUint24(b []byte) uint24 {
+	return uint24(b[0]) | (uint24(b[1]) << 8) | (uint24(b[2]) << 16)
 }
 
 // writeUint24 writes a uint24 to the buffer passed as 3 bytes. If not

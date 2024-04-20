@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"slices"
 )
 
 const (
@@ -94,55 +93,60 @@ func (pk *packet) write(buf *bytes.Buffer) {
 }
 
 // read reads a packet and its content from the buffer passed.
-func (pk *packet) read(buf *bytes.Buffer) error {
-	header, err := buf.ReadByte()
-	if err != nil {
-		return io.ErrUnexpectedEOF
+func (pk *packet) read(b []byte) (int, error) {
+	if len(b) < 3 {
+		return 0, io.ErrUnexpectedEOF
 	}
+	header := b[0]
 	pk.split = (header & splitFlag) != 0
 	pk.reliability = (header & 224) >> 5
-	packetLength, err := readUint16(buf)
-	if err != nil {
-		return io.ErrUnexpectedEOF
+
+	n := binary.BigEndian.Uint16(b[1:]) >> 3
+	if n == 0 {
+		return 0, errors.New("invalid packet length: cannot be 0")
 	}
-	packetLength >>= 3
-	if packetLength == 0 {
-		return errors.New("invalid packet length: cannot be 0")
-	}
+	offset := 3
 
 	if pk.reliable() {
-		if pk.messageIndex, err = readUint24(buf); err != nil {
-			return io.ErrUnexpectedEOF
+		if len(b)-offset < 3 {
+			return 0, io.ErrUnexpectedEOF
 		}
+		pk.messageIndex = loadUint24(b[offset:])
+		offset += 3
 	}
 
 	if pk.sequenced() {
-		if pk.sequenceIndex, err = readUint24(buf); err != nil {
-			return io.ErrUnexpectedEOF
+		if len(b)-offset < 3 {
+			return 0, io.ErrUnexpectedEOF
 		}
+		pk.sequenceIndex = loadUint24(b[offset:])
+		offset += 3
 	}
 
 	if pk.sequencedOrOrdered() {
-		if pk.orderIndex, err = readUint24(buf); err != nil {
-			return io.ErrUnexpectedEOF
+		if len(b)-offset < 4 {
+			return 0, io.ErrUnexpectedEOF
 		}
-		// Order channel (byte), we don't care about this.
-		buf.Next(1)
+		pk.orderIndex = loadUint24(b[offset:])
+		// Order channel (byte)
+		offset += 4
 	}
 
 	if pk.split {
-		pk.splitCount, _ = readUint32(buf)
-		pk.splitID, _ = readUint16(buf)
-		if pk.splitIndex, err = readUint32(buf); err != nil {
-			return io.ErrUnexpectedEOF
+		if len(b)-offset < 10 {
+			return 0, io.ErrUnexpectedEOF
 		}
+		pk.splitCount = binary.BigEndian.Uint32(b[offset:])
+		pk.splitID = binary.BigEndian.Uint16(b[offset+4:])
+		pk.splitIndex = binary.BigEndian.Uint32(b[offset+6:])
+		offset += 10
 	}
 
-	pk.content = make([]byte, packetLength)
-	if n, err := buf.Read(pk.content); err != nil || n != int(packetLength) {
-		return io.ErrUnexpectedEOF
+	pk.content = make([]byte, n)
+	if got := copy(pk.content, b[offset:]); got != int(n) {
+		return 0, io.ErrUnexpectedEOF
 	}
-	return nil
+	return offset + int(n), nil
 }
 
 func (pk *packet) reliable() bool {
@@ -175,123 +179,40 @@ func (pk *packet) sequenced() bool {
 }
 
 const (
-	// packetRange indicates a range of packets, followed by the first and the
-	// last packet in the range.
-	packetRange = iota
-	// packetSingle indicates a single packet, followed by its sequence number.
-	packetSingle
+	// Datagram header +
+	// Datagram sequence number +
+	// Packet header +
+	// Packet content length +
+	// Packet message index +
+	// Packet order index +
+	// Packet order channel
+	packetAdditionalSize = 1 + 3 + 1 + 2 + 3 + 3 + 1
+	// Packet split count +
+	// Packet split ID +
+	// Packet split index
+	splitAdditionalSize = 4 + 2 + 4
 )
 
-// acknowledgement is an acknowledgement packet that may either be an ACK or a
-// NACK, depending on the purpose that it is sent with.
-type acknowledgement struct {
-	packets []uint24
+// split splits a content buffer in smaller buffers so that they do not exceed
+// the MTU size that the connection holds.
+func split(b []byte, mtu uint16) [][]byte {
+	n := len(b)
+	maxSize := int(mtu - packetAdditionalSize)
+
+	if n > maxSize {
+		// If the content size is bigger than the maximum size here, it means
+		// the packet will get split. This means that the packet will get even
+		// bigger because a split packet uses 4 + 2 + 4 more bytes.
+		maxSize -= splitAdditionalSize
+	}
+	// If the content length can't be divided by maxSize perfectly, we need
+	// to reserve another fragment for the last bit of the packet.
+	fragmentCount := n/maxSize + min(n%maxSize, 1)
+	fragments := make([][]byte, fragmentCount)
+	for i := 0; i < fragmentCount-1; i++ {
+		fragments[i] = b[:maxSize]
+		b = b[maxSize:]
+	}
+	fragments[len(fragments)-1] = b
+	return fragments
 }
-
-// write encodes an acknowledgement packet and returns an error if not
-// successful.
-func (ack *acknowledgement) write(buf *bytes.Buffer, mtu uint16) int {
-	lenOffset := buf.Len()
-	writeUint16(buf, 0) // Placeholder for record count.
-
-	packets := ack.packets
-	if len(packets) == 0 {
-		return 0
-	}
-
-	var firstPacketInRange, lastPacketInRange uint24
-	var records uint16
-	n := 0
-
-	// Sort packets before encoding to ensure packets are encoded correctly.
-	slices.Sort(packets)
-
-	for index, pk := range packets {
-		if buf.Len() >= int(mtu-(28+10)) {
-			// We must make sure the final packet length doesn't exceed the MTU
-			// size.
-			break
-		}
-		n++
-		if index == 0 {
-			// The first packet, set the first and last packet to it.
-			firstPacketInRange, lastPacketInRange = pk, pk
-			continue
-		}
-		if pk == lastPacketInRange+1 {
-			// Packet is still part of the current range, as it's sequenced
-			// properly with the last packet. Set the last packet in range to
-			// the packet and continue to the next packet.
-			lastPacketInRange = pk
-			continue
-		}
-		ack.writeRecord(buf, firstPacketInRange, lastPacketInRange, &records)
-		firstPacketInRange, lastPacketInRange = pk, pk
-	}
-	// Make sure the last single packet/range is written, as we always need to
-	// know one packet ahead to know how we should write the current.
-	ack.writeRecord(buf, firstPacketInRange, lastPacketInRange, &records)
-
-	binary.BigEndian.PutUint16(buf.Bytes()[lenOffset:], records)
-	return n
-}
-
-func (ack *acknowledgement) writeRecord(buf *bytes.Buffer, first, last uint24, count *uint16) {
-	if first == last {
-		// First packet equals last packet, so we have a single packet
-		// record. Write down the packet, and set the first and last
-		// packet to the current packet.
-		buf.WriteByte(packetSingle)
-		writeUint24(buf, first)
-	} else {
-		// There's a gap between the first and last packet, so we have a
-		// range of packets. Write the first and last packet of the
-		// range and set both to the current packet.
-		buf.WriteByte(packetRange)
-		writeUint24(buf, first)
-		writeUint24(buf, last)
-	}
-	*count++
-}
-
-// read decodes an acknowledgement packet and returns an error if not
-// successful.
-func (ack *acknowledgement) read(buf *bytes.Buffer) error {
-	const maxAcknowledgementPackets = 8192
-	recordCount, err := readUint16(buf)
-	if err != nil {
-		return io.ErrUnexpectedEOF
-	}
-	for i := uint16(0); i < recordCount; i++ {
-		recordType, err := buf.ReadByte()
-		if err != nil {
-			return io.ErrUnexpectedEOF
-		}
-		switch recordType {
-		case packetRange:
-			start, _ := readUint24(buf)
-			end, err := readUint24(buf)
-			if err != nil {
-				return io.ErrUnexpectedEOF
-			}
-			if uint24(len(ack.packets))+end-start > maxAcknowledgementPackets {
-				return errMaxAcknowledgement
-			}
-			for pk := start; pk <= end; pk++ {
-				ack.packets = append(ack.packets, pk)
-			}
-		case packetSingle:
-			if len(ack.packets)+1 > maxAcknowledgementPackets {
-				return errMaxAcknowledgement
-			}
-			pk, err := readUint24(buf)
-			if err != nil {
-				return io.ErrUnexpectedEOF
-			}
-			ack.packets = append(ack.packets, pk)
-		}
-	}
-	return nil
-}
-
-var errMaxAcknowledgement = errors.New("maximum amount of packets in acknowledgement exceeded")

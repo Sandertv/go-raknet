@@ -1,7 +1,6 @@
 package raknet
 
 import (
-	"bytes"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"log/slog"
@@ -159,49 +158,40 @@ func (listener *Listener) listen() {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is
 	// allowed to have. We can re-use this buffer for each packet.
 	b := make([]byte, 1500)
-	buf := bytes.NewBuffer(b[:0])
 	for {
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
 			close(listener.incoming)
 			return
+		} else if n == 0 {
+			continue
 		}
-		_, _ = buf.Write(b[:n])
-
-		// Technically we should not re-use the same byte slice after its
-		// ownership has been taken by the buffer, but we can do this anyway
-		// because we copy the data later.
-		if err := listener.handle(buf, addr); err != nil {
+		if err := listener.handle(b[:n], addr); err != nil {
 			listener.log.Error("listener: handle packet: "+err.Error(), "address", addr.String())
 		}
-		buf.Reset()
 	}
 }
 
 // handle handles an incoming packet in buffer b from the address passed. If
 // not successful, an error is returned describing the issue.
-func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
+func (listener *Listener) handle(b []byte, addr net.Addr) error {
 	value, found := listener.connections.Load(resolve(addr))
 	if !found {
 		// If there was no session yet, it means the packet is an offline
-		// message. It is not contained in a datagram.
-		id, err := b.ReadByte()
-		if err != nil {
-			return fmt.Errorf("error reading packet ID byte: %v", err)
-		}
-		switch id {
+		// message. It is not wrapped in a datagram.
+		switch b[0] {
 		case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
-			return listener.handleUnconnectedPing(b, addr)
+			return handleUnconnectedPing(listener, b[1:], addr)
 		case message.IDOpenConnectionRequest1:
-			return listener.handleOpenConnectionRequest1(b, addr)
+			return handleOpenConnectionRequest1(listener, b[1:], addr)
 		case message.IDOpenConnectionRequest2:
-			return listener.handleOpenConnectionRequest2(b, addr)
+			return handleOpenConnectionRequest2(listener, b[1:], addr)
 		default:
 			// In some cases, the client will keep trying to send datagrams
 			// while it has already timed out. In this case, we should not print
 			// an error.
-			if id&bitFlagDatagram == 0 {
-				return fmt.Errorf("unknown packet received (len=%v, id=%x): %x", b.Len(), id, b.Bytes())
+			if b[0]&bitFlagDatagram == 0 {
+				return fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
 			}
 		}
 		return nil
@@ -218,88 +208,4 @@ func (listener *Listener) handle(b *bytes.Buffer, addr net.Addr) error {
 		}
 		return nil
 	}
-}
-
-// handleOpenConnectionRequest2 handles an open connection request 2 packet
-// stored in buffer b, coming from an address raddr.
-func (listener *Listener) handleOpenConnectionRequest2(b *bytes.Buffer, addr net.Addr) error {
-	pk := &message.OpenConnectionRequest2{}
-	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
-		return fmt.Errorf("error reading open connection request 2: %v", err)
-	}
-	b.Reset()
-
-	mtuSize := min(pk.ClientPreferredMTUSize, maxMTUSize)
-
-	data, _ := (&message.OpenConnectionReply2{ServerGUID: listener.id, ClientAddress: resolve(addr), MTUSize: mtuSize}).MarshalBinary()
-	if _, err := listener.conn.WriteTo(data, addr); err != nil {
-		return fmt.Errorf("error sending open connection reply 2: %v", err)
-	}
-
-	conn := newListenerConn(listener.conn, addr, pk.ClientPreferredMTUSize)
-	conn.close = func() {
-		// Make sure to remove the connection from the Listener once the Conn is
-		// closed.
-		listener.connections.Delete(resolve(addr))
-	}
-	listener.connections.Store(resolve(addr), conn)
-
-	go func() {
-		t := time.NewTimer(time.Second * 10)
-		defer t.Stop()
-		select {
-		case <-conn.connected:
-			// Add the connection to the incoming channel so that a caller of
-			// Accept() can receive it.
-			listener.incoming <- conn
-		case <-listener.closed:
-			_ = conn.Close()
-		case <-t.C:
-			// It took too long to complete this connection. We closed it and go
-			// back to accepting.
-			_ = conn.Close()
-		}
-	}()
-
-	return nil
-}
-
-// handleOpenConnectionRequest1 handles an open connection request 1 packet
-// stored in buffer b, coming from an address raddr.
-func (listener *Listener) handleOpenConnectionRequest1(b *bytes.Buffer, addr net.Addr) error {
-	pk := &message.OpenConnectionRequest1{}
-	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
-		return fmt.Errorf("error reading open connection request 1: %v", err)
-	}
-	b.Reset()
-	mtuSize := min(pk.MaximumSizeNotDropped, maxMTUSize)
-
-	if pk.Protocol != protocolVersion {
-		data, _ := (&message.IncompatibleProtocolVersion{ServerGUID: listener.id, ServerProtocol: protocolVersion}).MarshalBinary()
-		_, _ = listener.conn.WriteTo(data, addr)
-		return fmt.Errorf("error handling open connection request 1: incompatible protocol version %v (listener protocol = %v)", pk.Protocol, protocolVersion)
-	}
-
-	data, _ := (&message.OpenConnectionReply1{ServerGUID: listener.id, Secure: false, ServerPreferredMTUSize: mtuSize}).MarshalBinary()
-	_, err := listener.conn.WriteTo(data, addr)
-	return err
-}
-
-// handleUnconnectedPing handles an unconnected ping packet stored in buffer b,
-// coming from an address raddr.
-func (listener *Listener) handleUnconnectedPing(b *bytes.Buffer, addr net.Addr) error {
-	pk := &message.UnconnectedPing{}
-	if err := pk.UnmarshalBinary(b.Bytes()); err != nil {
-		return fmt.Errorf("error reading unconnected ping: %v", err)
-	}
-	b.Reset()
-
-	data, _ := (&message.UnconnectedPong{ServerGUID: listener.id, SendTimestamp: pk.SendTimestamp, Data: *listener.pongData.Load()}).MarshalBinary()
-	_, err := listener.conn.WriteTo(data, addr)
-	return err
-}
-
-// timestamp returns a timestamp in milliseconds.
-func timestamp() int64 {
-	return time.Now().UnixNano() / int64(time.Second)
 }

@@ -1,7 +1,6 @@
 package raknet
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -231,7 +230,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 }
 
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newDialerConn(internal.ConnToPacketConn(state.conn), state.raddr, uint16(state.mtu.Load()))
+	conn := newDialerConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu)
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTimestamp: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
@@ -254,8 +253,7 @@ func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, erro
 func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is
 	// allowed to have. We can re-use this buffer for each packet.
-	b := make([]byte, 1500)
-	buf := bytes.NewBuffer(b[:0])
+	b := make([]byte, rakConn.effectiveMTU())
 	for {
 		n, err := conn.Read(b)
 		if err != nil {
@@ -265,12 +263,12 @@ func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 				dialer.ErrorLog.Error("client: read packet: " + err.Error())
 			}
 			return
+		} else if n == 0 {
+			continue
 		}
-		buf.Write(b[:n])
-		if err := rakConn.receive(buf); err != nil {
+		if err := rakConn.receive(b[:n]); err != nil {
 			dialer.ErrorLog.Error("client: handle packet: " + err.Error())
 		}
-		buf.Reset()
 	}
 }
 
@@ -283,7 +281,7 @@ type connState struct {
 
 	// mtu is the final MTU size found by sending an open connection request
 	// 1 packet. It is the MTU size sent by the server.
-	mtu atomic.Uint32
+	mtu uint16
 
 	serverSecurity bool
 	cookie         uint32
@@ -322,10 +320,10 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 				// protection. For some reason they send a broken MTU size
 				// first. Sending a Request2 followed by a Request1 deals with
 				// this.
-				state.openConnectionRequest2()
+				state.openConnectionRequest2(response.ServerPreferredMTUSize)
 				continue
 			}
-			state.mtu.Store(uint32(response.ServerPreferredMTUSize))
+			state.mtu = response.ServerPreferredMTUSize
 			return nil
 		case message.IDIncompatibleProtocolVersion:
 			response := &message.IncompatibleProtocolVersion{}
@@ -362,7 +360,7 @@ func (state *connState) openConnection(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	go state.request2(ctx)
+	go state.request2(ctx, state.mtu)
 
 	b := make([]byte, 1492)
 	for {
@@ -380,18 +378,18 @@ func (state *connState) openConnection(ctx context.Context) error {
 		if err = pk.UnmarshalBinary(b[1:n]); err != nil {
 			return fmt.Errorf("read open connection reply 2: %v", err)
 		}
-		state.mtu.Store(uint32(pk.MTUSize))
+		state.mtu = pk.MTUSize
 		return nil
 	}
 }
 
 // request2 continuously sends a message.OpenConnectionRequest2 every 500ms.
-func (state *connState) request2(ctx context.Context) {
+func (state *connState) request2(ctx context.Context, mtu uint16) {
 	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
 
 	for {
-		state.openConnectionRequest2()
+		state.openConnectionRequest2(mtu)
 		select {
 		case <-ticker.C:
 			continue
@@ -410,10 +408,10 @@ func (state *connState) openConnectionRequest1(mtu uint16) {
 
 // openConnectionRequest2 sends an open connection request 2 packet to the
 // server. If not successful, an error is returned.
-func (state *connState) openConnectionRequest2() {
+func (state *connState) openConnectionRequest2(mtu uint16) {
 	data, _ := (&message.OpenConnectionRequest2{
 		ServerAddress:          resolve(state.raddr),
-		ClientPreferredMTUSize: uint16(state.mtu.Load()),
+		ClientPreferredMTUSize: mtu,
 		ClientGUID:             state.id,
 		ServerHasSecurity:      state.serverSecurity,
 		Cookie:                 state.cookie,
