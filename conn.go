@@ -79,7 +79,7 @@ type Conn struct {
 	packetQueue *packetQueue
 	// packets is a channel containing content of packets that were fully
 	// processed. Calling Conn.Read() consumes a value from this channel.
-	packets chan []byte
+	packets chan *[]byte
 
 	// retransmission is a queue filled with packets that were sent with a given
 	// datagram sequence number.
@@ -105,7 +105,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
-		packets:        make(chan []byte, 512),
+		packets:        make(chan *[]byte, 512),
 		splits:         make(map[uint16][][]byte),
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
@@ -284,10 +284,10 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case pk := <-conn.packets:
-		if len(b) < len(pk) {
+		if len(b) < len(*pk) {
 			err = conn.error(errBufferTooSmall, "read")
 		}
-		return copy(b, pk), err
+		return copy(b, *pk), err
 	case <-conn.closed:
 		return 0, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
@@ -301,7 +301,7 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 func (conn *Conn) ReadPacket() (b []byte, err error) {
 	select {
 	case pk := <-conn.packets:
-		return pk, err
+		return *pk, err
 	case <-conn.closed:
 		return nil, conn.error(net.ErrClosed, "read")
 	case <-conn.readDeadline:
@@ -507,7 +507,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 		// try to escape if the connection was closed.
 		select {
 		case <-conn.closed:
-		case conn.packets <- b:
+		case conn.packets <- &b:
 		}
 	}
 	return nil

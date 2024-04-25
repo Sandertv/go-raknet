@@ -81,12 +81,12 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		conn:     conn,
 		incoming: make(chan *Conn),
 		closed:   make(chan struct{}),
-		log:      slog.Default(),
+		log:      l.ErrorLog,
 		id:       atomic.AddInt64(&listenerID, 1),
 	}
 	listener.h = &listenerConnectionHandler{l: listener}
-	if l.ErrorLog != nil {
-		listener.log = l.ErrorLog
+	if l.ErrorLog == nil {
+		listener.log = slog.Default()
 	}
 
 	go listener.listen()
