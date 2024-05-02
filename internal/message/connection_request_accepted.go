@@ -33,7 +33,7 @@ func (pk *ConnectionRequestAccepted) UnmarshalBinary(data []byte) error {
 			break
 		}
 	}
-	if len(data) < 16 {
+	if len(data[offset:]) < 16 {
 		return io.ErrUnexpectedEOF
 	}
 	pk.RequestTimestamp = int64(binary.BigEndian.Uint64(data[offset:]))
