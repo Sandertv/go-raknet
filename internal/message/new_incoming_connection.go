@@ -32,7 +32,7 @@ func (pk *NewIncomingConnection) UnmarshalBinary(data []byte) error {
 			break
 		}
 	}
-	if len(data) < 16 {
+	if len(data[offset:]) < 16 {
 		return io.ErrUnexpectedEOF
 	}
 	pk.RequestTimestamp = int64(binary.BigEndian.Uint64(data[offset:]))
@@ -42,7 +42,7 @@ func (pk *NewIncomingConnection) UnmarshalBinary(data []byte) error {
 
 func (pk *NewIncomingConnection) MarshalBinary() (data []byte, err error) {
 	nAddr, nSys := sizeofAddr(pk.ServerAddress), pk.SystemAddresses.sizeOf()
-	b := make([]byte, 1+nAddr+2+nSys+16)
+	b := make([]byte, 1+nAddr+nSys+16)
 	b[0] = IDNewIncomingConnection
 	offset := 1 + putAddr(b[1:], pk.ServerAddress)
 	for _, addr := range pk.SystemAddresses {
