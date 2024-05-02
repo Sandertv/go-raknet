@@ -527,7 +527,7 @@ func resolve(addr net.Addr) netip.AddrPort {
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 512
-	const maxConcurrentSplits = 4
+	const maxConcurrentSplits = 16
 
 	if p.splitCount > maxSplitCount && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
@@ -678,5 +678,5 @@ func (conn *Conn) sendDatagram(pk *packet) error {
 
 // timestamp returns a timestamp in milliseconds.
 func timestamp() int64 {
-	return time.Now().UnixNano() / int64(time.Second)
+	return time.Now().UnixNano() / int64(time.Millisecond)
 }
