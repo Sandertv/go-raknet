@@ -222,14 +222,15 @@ func handleConnectionRequestAccepted(conn *Conn, b []byte) error {
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read CONNECTION_REQUEST_ACCEPTED: %w", err)
 	}
-
 	select {
 	case <-conn.connected:
 		return errUnexpectedAdditionalCRA
 	default:
+		// Make sure to send NewIncomingConnection before closing conn.connected.
+		err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.AcceptedTimestamp, AcceptedTimestamp: timestamp()})
 		close(conn.connected)
+		return err
 	}
-	return conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: pk.AcceptedTimestamp, SystemAddresses: pk.SystemAddresses})
 }
 
 // handleNewIncomingConnection handles an incoming connection packet from the

@@ -267,7 +267,7 @@ func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 			continue
 		}
 		if err := rakConn.receive(b[:n]); err != nil {
-			dialer.ErrorLog.Error("client: handle packet: " + err.Error())
+			dialer.ErrorLog.Error("client: " + err.Error())
 		}
 	}
 }

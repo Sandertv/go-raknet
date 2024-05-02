@@ -53,10 +53,11 @@ const (
 type packet struct {
 	reliability byte
 
-	content       []byte
 	messageIndex  uint24
 	sequenceIndex uint24
 	orderIndex    uint24
+
+	content []byte
 
 	split      bool
 	splitCount uint32
