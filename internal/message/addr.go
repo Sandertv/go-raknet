@@ -18,10 +18,10 @@ func (addresses systemAddresses) sizeOf() int {
 
 // sizeOfAddr returns the size in bytes of an address.
 func sizeofAddr(addr netip.AddrPort) int {
-	if addr.Addr().Is4() {
-		return sizeofAddr4
+	if addr.Addr().Is6() {
+		return sizeofAddr6
 	}
-	return sizeofAddr6
+	return sizeofAddr4
 }
 
 const (
@@ -31,20 +31,22 @@ const (
 
 func putAddr(b []byte, addrPort netip.AddrPort) int {
 	addr, port := addrPort.Addr(), addrPort.Port()
-	if addr.Is4() {
+	if !addr.Is4() && !addr.Is6() {
+		// Special case for zero addresses.
+		b[0], b[1], b[2], b[3], b[4] = 4, 255, 255, 255, 255
+		return sizeofAddr4
+	} else if addr.Is4() {
 		ip4 := addr.As4()
-		b[0] = 4
-		copy(b[1:], ip4[:])
+		b[0], b[1], b[2], b[3], b[4] = 4, ^ip4[0], ^ip4[1], ^ip4[2], ^ip4[3]
 		binary.BigEndian.PutUint16(b[5:], port)
 		return sizeofAddr4
 	} else {
 		ip16 := addr.As16()
 		b[0] = 6
-		// 2 bytes.
-		binary.BigEndian.PutUint16(b[3:], uint16(23)) // syscall.AF_INET6 on Windows.
-		binary.BigEndian.PutUint16(b[5:], port)
+		binary.LittleEndian.PutUint16(b[1:], uint16(23)) // syscall.AF_INET6 on Windows.
+		binary.BigEndian.PutUint16(b[3:], port)
 		// 4 bytes.
-		copy(b[11:], ip16[:])
+		copy(b[9:], ip16[:])
 		// 4 bytes.
 		return sizeofAddr6
 	}
@@ -56,8 +58,8 @@ func addr(b []byte) (netip.AddrPort, int) {
 		port := binary.BigEndian.Uint16(b[5:])
 		return netip.AddrPortFrom(ip, port), sizeofAddr4
 	} else {
-		port := binary.BigEndian.Uint16(b[5:])
-		ip := netip.AddrFrom16([16]byte(b[11:]))
+		port := binary.BigEndian.Uint16(b[3:])
+		ip := netip.AddrFrom16([16]byte(b[9:]))
 		return netip.AddrPortFrom(ip, port), sizeofAddr6
 	}
 }
