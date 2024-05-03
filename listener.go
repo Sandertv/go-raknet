@@ -110,7 +110,7 @@ func Listen(address string) (*Listener, error) {
 func (listener *Listener) Accept() (net.Conn, error) {
 	conn, ok := <-listener.incoming
 	if !ok {
-		return nil, &net.OpError{Op: "accept", Net: "raknet", Source: nil, Addr: nil, Err: errListenerClosed}
+		return nil, &net.OpError{Op: "accept", Net: "raknet", Source: nil, Addr: nil, Err: ErrListenerClosed}
 	}
 	return conn, nil
 }

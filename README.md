@@ -10,7 +10,7 @@ API used to listen for connections or connect to servers.
 ## Getting started
 
 ### Prerequisites
-**As of go-raknet version 1.13.0, go-raknet requires at least Go 1.21**. Version 1.12.1 of go-raknet is
+**As of go-raknet version 1.14.0, go-raknet requires at least Go 1.22**. Version 1.12.1 of go-raknet is
 the last version of the library that supports Go 1.18 and above.
 
 ### Usage

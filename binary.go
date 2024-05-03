@@ -9,6 +9,13 @@ import (
 // uint32, but is an alias for the sake of clarity.
 type uint24 uint32
 
+// Inc increments a uint24 and returns the old value.
+func (u *uint24) Inc() (old uint24) {
+	ret := *u
+	*u += 1
+	return ret
+}
+
 // readUint24 reads 3 bytes from the buffer passed and combines it into a
 // uint24. If there were no 3 bytes to read, an error is returned.
 func readUint24(buf *bytes.Buffer) (uint24, error) {

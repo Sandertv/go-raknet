@@ -61,13 +61,13 @@ func (m *resendMap) remove(index uint24, mul int) (*packet, bool) {
 // into the recovery queue and the taking out of it again. It is measured over
 // the last delayRecordCount values add in.
 func (m *resendMap) rtt() time.Duration {
-	const averageDuration = time.Second * 5
+	const maxRTT = time.Second * 5
 	var (
 		total, records time.Duration
 		now            = time.Now()
 	)
 	for t, rtt := range m.delays {
-		if now.Sub(t) > averageDuration {
+		if now.Sub(t) > maxRTT {
 			delete(m.delays, t)
 			continue
 		}
