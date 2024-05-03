@@ -30,7 +30,7 @@ type ListenConfig struct {
 // methods as those implemented by the TCPListener in the net package. Listener
 // implements the net.Listener interface.
 type Listener struct {
-	h *listenerConnectionHandler
+	h listenerConnectionHandler
 
 	once   sync.Once
 	closed chan struct{}
@@ -84,7 +84,7 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		log:      l.ErrorLog,
 		id:       atomic.AddInt64(&listenerID, 1),
 	}
-	listener.h = &listenerConnectionHandler{l: listener}
+	listener.h.l = listener
 	if l.ErrorLog == nil {
 		listener.log = slog.Default()
 	}

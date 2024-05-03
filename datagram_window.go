@@ -15,21 +15,23 @@ func newDatagramWindow() *datagramWindow {
 	return &datagramWindow{queue: make(map[uint24]time.Time)}
 }
 
-// new checks if the index passed is new to the datagramWindow.
-func (win *datagramWindow) new(index uint24) bool {
+// add puts an index in the window.
+func (win *datagramWindow) add(index uint24) bool {
+	if win.seen(index) {
+		return false
+	}
+	win.highest = max(win.highest, index+1)
+	win.queue[index] = time.Now()
+	return true
+}
+
+// seen checks if the index passed is known to the datagramWindow.
+func (win *datagramWindow) seen(index uint24) bool {
 	if index < win.lowest {
 		return true
 	}
 	_, ok := win.queue[index]
-	return !ok
-}
-
-// add puts an index in the window.
-func (win *datagramWindow) add(index uint24) {
-	if index >= win.highest {
-		win.highest = index + 1
-	}
-	win.queue[index] = time.Now()
+	return ok
 }
 
 // shift attempts to delete as many indices from the queue as possible,
@@ -51,9 +53,7 @@ func (win *datagramWindow) shift() (n int) {
 // set using add while within the window of lowest and highest index. The queue
 // is shifted after this call.
 func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
-	var (
-		missing = false
-	)
+	missing := false
 	for index := int(win.highest) - 1; index >= int(win.lowest); index-- {
 		i := uint24(index)
 		t, ok := win.queue[i]

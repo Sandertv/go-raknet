@@ -230,7 +230,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 }
 
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, &dialerConnectionHandler{})
+	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{})
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTimestamp: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
@@ -313,8 +313,7 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 			if err := response.UnmarshalBinary(b[1:n]); err != nil {
 				return fmt.Errorf("read open connection reply 1: %w", err)
 			}
-			state.serverSecurity = response.Secure
-			state.cookie = response.Cookie
+			state.serverSecurity, state.cookie = response.Secure, response.Cookie
 			if response.ServerGUID == 0 || response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
 				// This is an awful hack we cooked up to deal with OVH 'DDoS'
 				// protection. For some reason they send a broken MTU size
@@ -342,7 +341,7 @@ func (state *connState) request1(ctx context.Context, sizes []uint16) {
 	defer ticker.Stop()
 
 	for _, size := range sizes {
-		for attempt := 0; attempt < 3; attempt++ {
+		for range 3 {
 			state.openConnectionRequest1(size)
 			select {
 			case <-ticker.C:

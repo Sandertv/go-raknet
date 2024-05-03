@@ -1,3 +1,3 @@
 module github.com/sandertv/go-raknet
 
-go 1.21.0
+go 1.22

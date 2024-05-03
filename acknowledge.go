@@ -97,9 +97,8 @@ func (ack *acknowledgement) read(b []byte) error {
 	if len(b) < 2 {
 		return io.ErrUnexpectedEOF
 	}
-	n := binary.BigEndian.Uint16(b)
 	offset := 2
-	for i := uint16(0); i < n; i++ {
+	for range binary.BigEndian.Uint16(b) {
 		if len(b)-offset < 4 {
 			return io.ErrUnexpectedEOF
 		}

@@ -19,7 +19,7 @@ func (pk *NewIncomingConnection) UnmarshalBinary(data []byte) error {
 	}
 	var offset int
 	pk.ServerAddress, offset = addr(data)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		if len(data) < addrSize(data[offset:]) {
 			return io.ErrUnexpectedEOF
 		}

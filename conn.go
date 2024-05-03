@@ -162,7 +162,6 @@ func (conn *Conn) startTicking() {
 				conn.mu.Lock()
 				acksLeft = len(conn.retransmission.unacknowledged)
 				conn.mu.Unlock()
-
 				if before != 0 && acksLeft == 0 {
 					conn.closeImmediately()
 				}
@@ -383,13 +382,8 @@ func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 	return err
 }
 
-// packetPool is a sync.Pool used to pool packets that encapsulate their
-// content.
-var packetPool = sync.Pool{
-	New: func() interface{} {
-		return &packet{reliability: reliabilityReliableOrdered}
-	},
-}
+// packetPool is used to pool packets that encapsulate their content.
+var packetPool = sync.Pool{New: func() any { return &packet{reliability: reliabilityReliableOrdered} }}
 
 // receive receives a packet from the connection, handling it as appropriate.
 // If not successful, an error is returned.
@@ -422,13 +416,13 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 	conn.ackSlice = append(conn.ackSlice, seq)
 	conn.ackMu.Unlock()
 
-	if !conn.win.new(seq) {
-		// Datagram was already received, this might happen if a packet took a long time to arrive, and we already sent
-		// a NACK for it. This is expected to happen sometimes under normal circumstances, so no reason to return an
-		// error.
+	if !conn.win.add(seq) {
+		// Datagram was already received, this might happen if a packet took a
+		// long time to arrive, and we already sent a NACK for it. This is
+		// expected to happen sometimes under normal circumstances, so no reason
+		// to return an error.
 		return nil
 	}
-	conn.win.add(seq)
 	if conn.win.shift() == 0 {
 		// Datagram window couldn't be shifted up, so we're still missing
 		// packets.

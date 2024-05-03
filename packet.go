@@ -156,8 +156,9 @@ func (pk *packet) reliable() bool {
 		reliabilityReliableOrdered,
 		reliabilityReliableSequenced:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 func (pk *packet) sequencedOrOrdered() bool {
@@ -166,8 +167,9 @@ func (pk *packet) sequencedOrOrdered() bool {
 		reliabilityReliableOrdered,
 		reliabilityReliableSequenced:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 func (pk *packet) sequenced() bool {
@@ -175,8 +177,9 @@ func (pk *packet) sequenced() bool {
 	case reliabilityUnreliableSequenced,
 		reliabilityReliableSequenced:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 const (
@@ -210,7 +213,7 @@ func split(b []byte, mtu uint16) [][]byte {
 	// to reserve another fragment for the last bit of the packet.
 	fragmentCount := n/maxSize + min(n%maxSize, 1)
 	fragments := make([][]byte, fragmentCount)
-	for i := 0; i < fragmentCount-1; i++ {
+	for i := range fragmentCount - 1 {
 		fragments[i] = b[:maxSize]
 		b = b[maxSize:]
 	}
