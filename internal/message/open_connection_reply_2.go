@@ -9,8 +9,8 @@ import (
 type OpenConnectionReply2 struct {
 	ServerGUID    int64
 	ClientAddress netip.AddrPort
-	MTUSize       uint16
-	Secure        bool
+	MTU           uint16
+	DoSecurity    bool
 }
 
 func (pk *OpenConnectionReply2) UnmarshalBinary(data []byte) error {
@@ -21,8 +21,8 @@ func (pk *OpenConnectionReply2) UnmarshalBinary(data []byte) error {
 	pk.ServerGUID = int64(binary.BigEndian.Uint64(data[16:]))
 	pk.ClientAddress, _ = addr(data[24:])
 	offset := addrSize(data[24:])
-	pk.MTUSize = binary.BigEndian.Uint16(data[24+offset:])
-	pk.Secure = data[26+offset] != 0
+	pk.MTU = binary.BigEndian.Uint16(data[24+offset:])
+	pk.DoSecurity = data[26+offset] != 0
 
 	return nil
 }
@@ -34,8 +34,8 @@ func (pk *OpenConnectionReply2) MarshalBinary() (data []byte, err error) {
 	copy(b[1:], unconnectedMessageSequence[:])
 	binary.BigEndian.PutUint64(b[17:], uint64(pk.ServerGUID))
 	putAddr(b[25:], pk.ClientAddress)
-	binary.BigEndian.PutUint16(b[25+offset:], pk.MTUSize)
-	if pk.Secure {
+	binary.BigEndian.PutUint16(b[25+offset:], pk.MTU)
+	if pk.DoSecurity {
 		b[27+offset] = 1
 	}
 	return b, nil

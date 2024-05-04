@@ -136,7 +136,7 @@ func (dialer Dialer) PingContext(ctx context.Context, address string) (response 
 	}
 	defer conn.Close()
 
-	data, _ := (&message.UnconnectedPing{SendTimestamp: timestamp(), ClientGUID: atomic.AddInt64(&dialerID, 1)}).MarshalBinary()
+	data, _ := (&message.UnconnectedPing{PingTime: timestamp(), ClientGUID: atomic.AddInt64(&dialerID, 1)}).MarshalBinary()
 	if _, err := conn.Write(data); err != nil {
 		return nil, dialer.error("ping", err)
 	}
@@ -230,9 +230,11 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	return dialer.connect(ctx, cs)
 }
 
+// dial finishes the RakNet connection sequence and returns a Conn if
+// successful.
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
 	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{})
-	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTimestamp: timestamp()})); err != nil {
+	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTime: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
 
@@ -316,16 +318,16 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 			if err := response.UnmarshalBinary(b[1:n]); err != nil {
 				return fmt.Errorf("read open connection reply 1: %w", err)
 			}
-			state.serverSecurity, state.cookie = response.Secure, response.Cookie
-			if response.ServerGUID == 0 || response.ServerPreferredMTUSize < 400 || response.ServerPreferredMTUSize > 1500 {
+			state.serverSecurity, state.cookie = response.ServerHasSecurity, response.Cookie
+			if response.ServerGUID == 0 || response.MTU < 400 || response.MTU > 1500 {
 				// This is an awful hack we cooked up to deal with OVH 'DDoS'
 				// protection. For some reason they send a broken MTU size
 				// first. Sending a Request2 followed by a Request1 deals with
 				// this.
-				state.openConnectionRequest2(response.ServerPreferredMTUSize)
+				state.openConnectionRequest2(response.MTU)
 				continue
 			}
-			state.mtu = response.ServerPreferredMTUSize
+			state.mtu = response.MTU
 			return nil
 		case message.IDIncompatibleProtocolVersion:
 			response := &message.IncompatibleProtocolVersion{}
@@ -378,7 +380,7 @@ func (state *connState) openConnection(ctx context.Context) error {
 		if err = pk.UnmarshalBinary(b[1:n]); err != nil {
 			return fmt.Errorf("read open connection reply 2: %v", err)
 		}
-		state.mtu = pk.MTUSize
+		state.mtu = pk.MTU
 		return nil
 	}
 }
@@ -400,7 +402,7 @@ func (state *connState) request2(ctx context.Context, mtu uint16) {
 // openConnectionRequest1 sends an open connection request 1 packet to the
 // server. If not successful, an error is returned.
 func (state *connState) openConnectionRequest1(mtu uint16) {
-	data, _ := (&message.OpenConnectionRequest1{Protocol: protocolVersion, MaximumSizeNotDropped: mtu}).MarshalBinary()
+	data, _ := (&message.OpenConnectionRequest1{ClientProtocol: protocolVersion, MTU: mtu}).MarshalBinary()
 	_, _ = state.conn.Write(data)
 }
 
@@ -408,11 +410,11 @@ func (state *connState) openConnectionRequest1(mtu uint16) {
 // server. If not successful, an error is returned.
 func (state *connState) openConnectionRequest2(mtu uint16) {
 	data, _ := (&message.OpenConnectionRequest2{
-		ServerAddress:          resolve(state.raddr),
-		ClientPreferredMTUSize: mtu,
-		ClientGUID:             state.id,
-		ServerHasSecurity:      state.serverSecurity,
-		Cookie:                 state.cookie,
+		ServerAddress:     resolve(state.raddr),
+		MTU:               mtu,
+		ClientGUID:        state.id,
+		ServerHasSecurity: state.serverSecurity,
+		Cookie:            state.cookie,
 	}).MarshalBinary()
 	_, _ = state.conn.Write(data)
 }

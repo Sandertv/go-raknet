@@ -6,7 +6,6 @@ import (
 )
 
 type IncompatibleProtocolVersion struct {
-	Magic          [16]byte
 	ServerProtocol byte
 	ServerGUID     int64
 }

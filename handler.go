@@ -64,7 +64,7 @@ func (h listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, e
 		return true, nil
 	case message.IDDetectLostConnections:
 		// Let the other end know the connection is still alive.
-		return true, conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
+		return true, conn.send(&message.ConnectedPing{PingTime: timestamp()})
 	default:
 		return false, nil
 	}
@@ -77,7 +77,7 @@ func (h listenerConnectionHandler) handleUnconnectedPing(b []byte, addr net.Addr
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read UNCONNECTED_PING: %w", err)
 	}
-	data, _ := (&message.UnconnectedPong{ServerGUID: h.l.id, SendTimestamp: pk.SendTimestamp, Data: *h.l.pongData.Load()}).MarshalBinary()
+	data, _ := (&message.UnconnectedPong{ServerGUID: h.l.id, PingTime: pk.PingTime, Data: *h.l.pongData.Load()}).MarshalBinary()
 	_, err := h.l.conn.WriteTo(data, addr)
 	return err
 }
@@ -89,15 +89,15 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest1(b []byte, addr n
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read OPEN_CONNECTION_REQUEST_1: %w", err)
 	}
-	mtuSize := min(pk.MaximumSizeNotDropped, maxMTUSize)
+	mtuSize := min(pk.MTU, maxMTUSize)
 
-	if pk.Protocol != protocolVersion {
+	if pk.ClientProtocol != protocolVersion {
 		data, _ := (&message.IncompatibleProtocolVersion{ServerGUID: h.l.id, ServerProtocol: protocolVersion}).MarshalBinary()
 		_, _ = h.l.conn.WriteTo(data, addr)
-		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_1: incompatible protocol version %v (listener protocol = %v)", pk.Protocol, protocolVersion)
+		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_1: incompatible protocol version %v (listener protocol = %v)", pk.ClientProtocol, protocolVersion)
 	}
 
-	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, Secure: false, ServerPreferredMTUSize: mtuSize}).MarshalBinary()
+	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, ServerHasSecurity: false, MTU: mtuSize}).MarshalBinary()
 	_, err := h.l.conn.WriteTo(data, addr)
 	return err
 }
@@ -109,9 +109,9 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read OPEN_CONNECTION_REQUEST_2: %w", err)
 	}
-	mtuSize := min(pk.ClientPreferredMTUSize, maxMTUSize)
+	mtuSize := min(pk.MTU, maxMTUSize)
 
-	data, _ := (&message.OpenConnectionReply2{ServerGUID: h.l.id, ClientAddress: resolve(addr), MTUSize: mtuSize}).MarshalBinary()
+	data, _ := (&message.OpenConnectionReply2{ServerGUID: h.l.id, ClientAddress: resolve(addr), MTU: mtuSize}).MarshalBinary()
 	if _, err := h.l.conn.WriteTo(data, addr); err != nil {
 		return fmt.Errorf("send OPEN_CONNECTION_REPLY_2: %w", err)
 	}
@@ -146,7 +146,7 @@ func (h listenerConnectionHandler) handleConnectionRequest(conn *Conn, b []byte)
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read CONNECTION_REQUEST: %w", err)
 	}
-	return conn.send(&message.ConnectionRequestAccepted{ClientAddress: resolve(conn.raddr), RequestTimestamp: pk.RequestTimestamp, AcceptedTimestamp: timestamp()})
+	return conn.send(&message.ConnectionRequestAccepted{ClientAddress: resolve(conn.raddr), PingTime: pk.RequestTime, PongTime: timestamp()})
 }
 
 // handleNewIncomingConnection handles an incoming connection packet from the
@@ -194,7 +194,7 @@ func (h dialerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err
 		return true, nil
 	case message.IDDetectLostConnections:
 		// Let the other end know the connection is still alive.
-		return true, conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
+		return true, conn.send(&message.ConnectedPing{PingTime: timestamp()})
 	default:
 		return false, nil
 	}
@@ -212,7 +212,7 @@ func (h dialerConnectionHandler) handleConnectionRequestAccepted(conn *Conn, b [
 		return errUnexpectedAdditionalCRA
 	default:
 		// Make sure to send NewIncomingConnection before closing conn.connected.
-		err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), RequestTimestamp: pk.AcceptedTimestamp, AcceptedTimestamp: timestamp()})
+		err := conn.send(&message.NewIncomingConnection{ServerAddress: resolve(conn.raddr), PingTime: pk.PongTime, PongTime: timestamp()})
 		close(conn.connected)
 		return err
 	}
@@ -227,7 +227,7 @@ func handleConnectedPing(conn *Conn, b []byte) error {
 	}
 	// Respond with a connected pong that has the ping timestamp found in the
 	// connected ping, and our own timestamp for the pong timestamp.
-	return conn.send(&message.ConnectedPong{ClientTimestamp: pk.ClientTimestamp, ServerTimestamp: timestamp()})
+	return conn.send(&message.ConnectedPong{PingTime: pk.PingTime, PongTime: timestamp()})
 }
 
 // handleConnectedPong handles a connected pong packet inside of buffer b. An
@@ -237,7 +237,7 @@ func handleConnectedPong(b []byte) error {
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read CONNECTED_PONG: %w", err)
 	}
-	if pk.ClientTimestamp > timestamp() {
+	if pk.PingTime > timestamp() {
 		return fmt.Errorf("handle CONNECTED_PONG: timestamp is in the future")
 	}
 	// We don't actually use the ConnectedPong to measure rtt. It is too

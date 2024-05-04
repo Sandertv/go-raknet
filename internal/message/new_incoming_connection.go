@@ -7,10 +7,12 @@ import (
 )
 
 type NewIncomingConnection struct {
-	ServerAddress     netip.AddrPort
-	SystemAddresses   systemAddresses
-	RequestTimestamp  int64
-	AcceptedTimestamp int64
+	ServerAddress   netip.AddrPort
+	SystemAddresses systemAddresses
+	// PingTime is filled out with ConnectionRequestAccepted.PongTime.
+	PingTime int64
+	// PongTime is a timestamp from the moment the packet is sent.
+	PongTime int64
 }
 
 func (pk *NewIncomingConnection) UnmarshalBinary(data []byte) error {
@@ -35,8 +37,8 @@ func (pk *NewIncomingConnection) UnmarshalBinary(data []byte) error {
 	if len(data[offset:]) < 16 {
 		return io.ErrUnexpectedEOF
 	}
-	pk.RequestTimestamp = int64(binary.BigEndian.Uint64(data[offset:]))
-	pk.AcceptedTimestamp = int64(binary.BigEndian.Uint64(data[offset+8:]))
+	pk.PingTime = int64(binary.BigEndian.Uint64(data[offset:]))
+	pk.PongTime = int64(binary.BigEndian.Uint64(data[offset+8:]))
 	return nil
 }
 
@@ -48,7 +50,7 @@ func (pk *NewIncomingConnection) MarshalBinary() (data []byte, err error) {
 	for _, addr := range pk.SystemAddresses {
 		offset += putAddr(b[offset:], addr)
 	}
-	binary.BigEndian.PutUint64(b[offset:], uint64(pk.RequestTimestamp))
-	binary.BigEndian.PutUint64(b[offset+8:], uint64(pk.AcceptedTimestamp))
+	binary.BigEndian.PutUint64(b[offset:], uint64(pk.PingTime))
+	binary.BigEndian.PutUint64(b[offset+8:], uint64(pk.PongTime))
 	return b, nil
 }
