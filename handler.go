@@ -38,7 +38,7 @@ func (h listenerConnectionHandler) close(conn *Conn) {
 // hash of the random cookie salt and the address.
 func (h listenerConnectionHandler) cookie(addr net.Addr) uint32 {
 	udp, _ := addr.(*net.UDPAddr)
-	b := make([]byte, 6, 10)
+	b := make([]byte, 6, 22)
 	binary.LittleEndian.PutUint32(b, h.cookieSalt)
 	binary.LittleEndian.PutUint16(b, uint16(udp.Port))
 	b = append(b, udp.IP...)
