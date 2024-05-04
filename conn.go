@@ -105,7 +105,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
 		retransmission: newRecoveryQueue(),
-		buf:            bytes.NewBuffer(make([]byte, 0, mtu)),
+		buf:            bytes.NewBuffer(make([]byte, 0, mtu-28)), // - headers.
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 128)),
 		nackBuf:        bytes.NewBuffer(make([]byte, 0, 64)),
 	}
@@ -160,7 +160,7 @@ func (conn *Conn) startTicking() {
 				_ = conn.send(&message.ConnectedPing{ClientTimestamp: timestamp()})
 
 				conn.mu.Lock()
-				if t.Sub(*conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt()*2 {
+				if t.Sub(*conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt(t)*2 {
 					// No activity for too long: Start timeout.
 					_ = conn.Close()
 				}
@@ -196,7 +196,7 @@ func (conn *Conn) checkResend(now time.Time) {
 
 	var (
 		resend []uint24
-		rtt    = conn.retransmission.rtt()
+		rtt    = conn.retransmission.rtt(now)
 		delay  = rtt + rtt/2
 	)
 	conn.rtt.Store(int64(rtt))

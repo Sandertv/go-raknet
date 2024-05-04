@@ -219,7 +219,8 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		return nil, dialer.error("dial", err)
 	}
 
-	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1)}
+	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
+	defer cs.ticker.Stop()
 	if err = cs.discoverMTU(ctx); err != nil {
 		return nil, dialer.error("dial", err)
 	} else if err = cs.openConnection(ctx); err != nil {
@@ -285,6 +286,8 @@ type connState struct {
 
 	serverSecurity bool
 	cookie         uint32
+
+	ticker *time.Ticker
 }
 
 var mtuSizes = []uint16{1492, 1200, 576}
@@ -337,14 +340,12 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 // request1 sends a message.OpenConnectionRequest1 three times for each mtu
 // size passed, spaced by 500ms.
 func (state *connState) request1(ctx context.Context, sizes []uint16) {
-	ticker := time.NewTicker(time.Second / 2)
-	defer ticker.Stop()
-
+	state.ticker.Reset(time.Second / 2)
 	for _, size := range sizes {
 		for range 3 {
 			state.openConnectionRequest1(size)
 			select {
-			case <-ticker.C:
+			case <-state.ticker.C:
 				continue
 			case <-ctx.Done():
 				return
@@ -384,13 +385,11 @@ func (state *connState) openConnection(ctx context.Context) error {
 
 // request2 continuously sends a message.OpenConnectionRequest2 every 500ms.
 func (state *connState) request2(ctx context.Context, mtu uint16) {
-	ticker := time.NewTicker(time.Second / 2)
-	defer ticker.Stop()
-
+	state.ticker.Reset(time.Second / 2)
 	for {
 		state.openConnectionRequest2(mtu)
 		select {
-		case <-ticker.C:
+		case <-state.ticker.C:
 			continue
 		case <-ctx.Done():
 			return

@@ -1,6 +1,7 @@
 package raknet
 
 import (
+	"maps"
 	"time"
 )
 
@@ -60,23 +61,20 @@ func (m *resendMap) remove(index uint24, mul int) (*packet, bool) {
 // rtt returns the average round trip time between the putting of the value
 // into the recovery queue and the taking out of it again. It is measured over
 // the last delayRecordCount values add in.
-func (m *resendMap) rtt() time.Duration {
-	const maxRTT = time.Second * 5
-	var (
-		total, records time.Duration
-		now            = time.Now()
-	)
-	for t, rtt := range m.delays {
-		if now.Sub(t) > maxRTT {
-			delete(m.delays, t)
-			continue
-		}
-		total += rtt
-		records++
-	}
-	if records == 0 {
-		// No records yet, generally should not happen. Just return a reasonable amount of time.
+func (m *resendMap) rtt(now time.Time) time.Duration {
+	const rttCalculationWindow = time.Second * 5
+	maps.DeleteFunc(m.delays, func(t time.Time, duration time.Duration) bool {
+		// Remove records that are older than the max window.
+		return now.Sub(t) > rttCalculationWindow
+	})
+	if len(m.delays) == 0 {
+		// No records yet, generally should not happen. Just return a reasonable
+		// amount of time.
 		return time.Millisecond * 50
 	}
-	return total / records
+	var total time.Duration
+	for _, rtt := range m.delays {
+		total += rtt
+	}
+	return total / time.Duration(len(m.delays))
 }
