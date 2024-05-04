@@ -85,6 +85,7 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		id:       atomic.AddInt64(&listenerID, 1),
 	}
 	listener.h = &listenerConnectionHandler{l: listener, cookieSalt: rand.Uint32()}
+	listener.pongData.Store(new([]byte))
 	if l.ErrorLog == nil {
 		listener.log = slog.Default()
 	}
