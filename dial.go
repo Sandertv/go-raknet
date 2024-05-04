@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
@@ -179,7 +179,7 @@ func (dialer Dialer) dial(ctx context.Context, address string) (net.Conn, error)
 }
 
 // dialerID is a counter used to produce an ID for the client.
-var dialerID = rand.Int63()
+var dialerID = rand.Int64()
 
 // Dial attempts to dial a RakNet connection to the address passed. The address
 // may be either an IP address or a hostname, combined with a port that is

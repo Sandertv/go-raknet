@@ -1,9 +1,11 @@
 package raknet
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
+	"hash/crc32"
 	"net"
 	"time"
 )
@@ -14,7 +16,10 @@ type connectionHandler interface {
 	close(conn *Conn)
 }
 
-type listenerConnectionHandler struct{ l *Listener }
+type listenerConnectionHandler struct {
+	l          *Listener
+	cookieSalt uint32
+}
 
 var (
 	errUnexpectedCRA           = errors.New("unexpected CONNECTION_REQUEST_ACCEPTED packet")
@@ -27,6 +32,20 @@ func (h listenerConnectionHandler) limitsEnabled() bool {
 
 func (h listenerConnectionHandler) close(conn *Conn) {
 	h.l.connections.Delete(resolve(conn.raddr))
+}
+
+// cookie calculates a cookie for the net.Addr passed. It is calculated as a
+// hash of the random cookie salt and the address.
+func (h listenerConnectionHandler) cookie(addr net.Addr) uint32 {
+	udp, _ := addr.(*net.UDPAddr)
+	b := make([]byte, 6, 10)
+	binary.LittleEndian.PutUint32(b, h.cookieSalt)
+	binary.LittleEndian.PutUint16(b, uint16(udp.Port))
+	b = append(b, udp.IP...)
+	// CRC32 isn't cryptographically secure, but we don't really need that here.
+	// A new salt is calculated every time a Listener is created and we don't
+	// have any data that needs to protected. We just need a fast hash.
+	return crc32.ChecksumIEEE(b)
 }
 
 func (h listenerConnectionHandler) handleUnconnected(b []byte, addr net.Addr) error {
@@ -45,29 +64,6 @@ func (h listenerConnectionHandler) handleUnconnected(b []byte, addr net.Addr) er
 		return nil
 	}
 	return fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
-}
-
-func (h listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err error) {
-	switch b[0] {
-	case message.IDConnectionRequest:
-		return true, h.handleConnectionRequest(conn, b[1:])
-	case message.IDConnectionRequestAccepted:
-		return true, errUnexpectedCRA
-	case message.IDNewIncomingConnection:
-		return true, h.handleNewIncomingConnection(conn)
-	case message.IDConnectedPing:
-		return true, handleConnectedPing(conn, b[1:])
-	case message.IDConnectedPong:
-		return true, handleConnectedPong(b[1:])
-	case message.IDDisconnectNotification:
-		conn.closeImmediately()
-		return true, nil
-	case message.IDDetectLostConnections:
-		// Let the other end know the connection is still alive.
-		return true, conn.send(&message.ConnectedPing{PingTime: timestamp()})
-	default:
-		return false, nil
-	}
 }
 
 // handleUnconnectedPing handles an unconnected ping packet stored in buffer b,
@@ -97,7 +93,7 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest1(b []byte, addr n
 		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_1: incompatible protocol version %v (listener protocol = %v)", pk.ClientProtocol, protocolVersion)
 	}
 
-	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, ServerHasSecurity: false, MTU: mtuSize}).MarshalBinary()
+	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, Cookie: h.cookie(addr), ServerHasSecurity: true, MTU: mtuSize}).MarshalBinary()
 	_, err := h.l.conn.WriteTo(data, addr)
 	return err
 }
@@ -105,9 +101,12 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest1(b []byte, addr n
 // handleOpenConnectionRequest2 handles an open connection request 2 packet
 // stored in buffer b, coming from an address.
 func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr net.Addr) error {
-	pk := &message.OpenConnectionRequest2{}
+	pk := &message.OpenConnectionRequest2{ServerHasSecurity: true}
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read OPEN_CONNECTION_REQUEST_2: %w", err)
+	}
+	if expected := h.cookie(addr); pk.Cookie != expected {
+		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid cookie '%x', expected '%x'", pk.Cookie, expected)
 	}
 	mtuSize := min(pk.MTU, maxMTUSize)
 
@@ -135,8 +134,30 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 			_ = conn.Close()
 		}
 	}()
-
 	return nil
+}
+
+func (h listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err error) {
+	switch b[0] {
+	case message.IDConnectionRequest:
+		return true, h.handleConnectionRequest(conn, b[1:])
+	case message.IDConnectionRequestAccepted:
+		return true, errUnexpectedCRA
+	case message.IDNewIncomingConnection:
+		return true, h.handleNewIncomingConnection(conn)
+	case message.IDConnectedPing:
+		return true, handleConnectedPing(conn, b[1:])
+	case message.IDConnectedPong:
+		return true, handleConnectedPong(b[1:])
+	case message.IDDisconnectNotification:
+		conn.closeImmediately()
+		return true, nil
+	case message.IDDetectLostConnections:
+		// Let the other end know the connection is still alive.
+		return true, conn.send(&message.ConnectedPing{PingTime: timestamp()})
+	default:
+		return false, nil
+	}
 }
 
 // handleConnectionRequest handles a connection request packet inside of buffer

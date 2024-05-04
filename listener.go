@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -30,7 +30,7 @@ type ListenConfig struct {
 // methods as those implemented by the TCPListener in the net package. Listener
 // implements the net.Listener interface.
 type Listener struct {
-	h listenerConnectionHandler
+	h *listenerConnectionHandler
 
 	once   sync.Once
 	closed chan struct{}
@@ -58,7 +58,7 @@ type Listener struct {
 }
 
 // listenerID holds the next ID to use for a Listener.
-var listenerID = rand.Int63()
+var listenerID = rand.Int64()
 
 // Listen listens on the address passed and returns a listener that may be used
 // to accept connections. If not successful, an error is returned. The address
@@ -84,7 +84,7 @@ func (l ListenConfig) Listen(address string) (*Listener, error) {
 		log:      l.ErrorLog,
 		id:       atomic.AddInt64(&listenerID, 1),
 	}
-	listener.h.l = listener
+	listener.h = &listenerConnectionHandler{l: listener, cookieSalt: rand.Uint32()}
 	if l.ErrorLog == nil {
 		listener.log = slog.Default()
 	}
