@@ -63,7 +63,7 @@ func (h listenerConnectionHandler) handleUnconnected(b []byte, addr net.Addr) er
 		// an error.
 		return nil
 	}
-	return fmt.Errorf("unknown packet received (len=%v): %x", len(b), b)
+	return fmt.Errorf("unknown packet received (id=%x, len=%v)", b[0], len(b))
 }
 
 // handleUnconnectedPing handles an unconnected ping packet stored in buffer b,
