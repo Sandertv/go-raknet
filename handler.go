@@ -129,7 +129,7 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 		case <-h.l.closed:
 			_ = conn.Close()
 		case <-t.C:
-			// It took too long to complete this connection. We closed it and go
+			// It took too long to complete this connection. We close it and go
 			// back to accepting.
 			_ = conn.Close()
 		}

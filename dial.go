@@ -88,9 +88,9 @@ func DialContext(ctx context.Context, address string) (*Conn, error) {
 // Dialer allows dialing a RakNet connection with specific configuration, such
 // as the protocol version of the connection and the logger used.
 type Dialer struct {
-	// ErrorLog is a logger that errors from packet decoding are logged to. It
-	// may be set to a logger that simply discards the messages. The default
-	// value is slog.Default().
+	// ErrorLog is a logger that errors from packet decoding are logged to. By
+	// default, ErrorLog is set to a new slog.Logger with a slog.Handler that
+	// is always disabled. Error messages are thus not logged by default.
 	ErrorLog *slog.Logger
 
 	// UpstreamDialer is a dialer that will override the default dialer for
@@ -211,7 +211,7 @@ func (dialer Dialer) DialTimeout(address string, timeout time.Duration) (*Conn, 
 // context.Context is closed.
 func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, error) {
 	if dialer.ErrorLog == nil {
-		dialer.ErrorLog = slog.Default()
+		dialer.ErrorLog = slog.New(internal.DiscardHandler{})
 	}
 
 	conn, err := dialer.dial(ctx, address)

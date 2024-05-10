@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"fmt"
+	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
 	"maps"
 	"math"
@@ -19,9 +20,9 @@ type UpstreamPacketListener interface {
 
 // ListenConfig may be used to pass additional configuration to a Listener.
 type ListenConfig struct {
-	// ErrorLog is a logger that errors from packet decoding are logged to. It
-	// may be set to a logger that simply discards the messages. The default
-	// value is slog.Default().
+	// ErrorLog is a logger that errors from packet decoding are logged to. By
+	// default, ErrorLog is set to a new slog.Logger with a slog.Handler that
+	// is always disabled. Error messages are thus not logged by default.
 	ErrorLog *slog.Logger
 
 	// UpstreamPacketListener adds an abstraction for net.ListenPacket.
@@ -79,7 +80,7 @@ var listenerID = rand.Int64()
 // as the used log and/or the accepted protocol.
 func (conf ListenConfig) Listen(address string) (*Listener, error) {
 	if conf.ErrorLog == nil {
-		conf.ErrorLog = slog.Default()
+		conf.ErrorLog = slog.New(internal.DiscardHandler{})
 	}
 	if conf.BlockDuration == 0 {
 		conf.BlockDuration = time.Second * 10
