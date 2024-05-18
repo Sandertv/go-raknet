@@ -149,7 +149,7 @@ func (conn *Conn) startTicking() {
 				if before != 0 && acksLeft == 0 {
 					conn.closeImmediately()
 				}
-				since := time.Since(time.Unix(unix, 0))
+				since := t.Sub(time.Unix(unix, 0))
 				if (acksLeft == 0 && since > time.Second) || since > time.Second*5 {
 					conn.closeImmediately()
 				}
@@ -342,7 +342,7 @@ func (conn *Conn) Latency() time.Duration {
 	return time.Duration(conn.rtt.Load() / 2)
 }
 
-// send encodes an encoding.BinaryMarshaler and sends it.
+// send encodes an encoding.BinaryMarshaler and writes it to the Conn.
 func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
 	_, err := conn.Write(b)
