@@ -118,10 +118,10 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 		return fmt.Errorf("send OPEN_CONNECTION_REPLY_2: %w", err)
 	}
 
-	conn := newConn(h.l.conn, addr, mtuSize, h)
-	h.l.connections.Store(resolve(addr), conn)
-
 	go func() {
+		conn := newConn(h.l.conn, addr, mtuSize, h)
+		h.l.connections.Store(resolve(addr), conn)
+
 		t := time.NewTimer(time.Second * 10)
 		defer t.Stop()
 		select {

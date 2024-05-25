@@ -1,0 +1,73 @@
+package internal
+
+import (
+	"sync"
+	"sync/atomic"
+)
+
+// ElasticChan is a channel that grows if its capacity is reached.
+type ElasticChan[T any] struct {
+	mu  sync.RWMutex
+	len atomic.Int64
+	ch  chan T
+}
+
+// Chan creates an ElasticChan of a size.
+func Chan[T any](size int) *ElasticChan[T] {
+	c := new(ElasticChan[T])
+	c.grow(size)
+	return c
+}
+
+// Recv attempts to read a value from the channel. If cancel is closed, Recv
+// will return ok = false.
+func (c *ElasticChan[T]) Recv(cancel <-chan struct{}) (val T, ok bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	select {
+	case <-cancel:
+		return val, false
+	case val = <-c.ch:
+		if c.len.Add(-1) < 0 {
+			panic("unreachable")
+		}
+		return val, true
+	}
+}
+
+// Send sends a value to the channel. Send never blocks, because if the maximum
+// capacity of the underlying channel is reached, a larger one is created.
+func (c *ElasticChan[T]) Send(val T) {
+	if c.len.Load()+1 >= int64(cap(c.ch)) {
+		// This check happens outside a lock, meaning in the meantime, a call to
+		// Recv could cause the length to decrease, technically meaning growing
+		// is then unnecessary. That isn't a major issue though, as in most
+		// cases growing would still be necessary later.
+		c.growSend(val)
+		return
+	}
+	c.len.Add(1)
+	c.ch <- val
+}
+
+// growSend grows the channel to double the capacity, copying all values
+// currently in the channel, and sends the value to the new channel.
+func (c *ElasticChan[T]) growSend(val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.grow(cap(c.ch) * 2)
+	c.len.Add(1)
+	c.ch <- val
+}
+
+// grow grows the ElasticChan to the size passed, copying all values currently
+// in the channel into a new channel with a bigger buffer.
+func (c *ElasticChan[T]) grow(size int) {
+	ch := make(chan T, size)
+	for len(c.ch) > 0 {
+		ch <- <-c.ch
+	}
+	c.ch = ch
+}

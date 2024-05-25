@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"github.com/sandertv/go-raknet/internal"
 	"github.com/sandertv/go-raknet/internal/message"
 	"io"
 	"net"
@@ -79,7 +80,7 @@ type Conn struct {
 	packetQueue *packetQueue
 	// packets is a channel containing content of packets that were fully
 	// processed. Calling Conn.Read() consumes a value from this channel.
-	packets chan *[]byte
+	packets *internal.ElasticChan[[]byte]
 
 	// retransmission is a queue filled with packets that were sent with a given
 	// datagram sequence number.
@@ -100,7 +101,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
-		packets:        make(chan *[]byte, 512),
+		packets:        internal.Chan[[]byte](4),
 		splits:         make(map[uint16][][]byte),
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
@@ -273,27 +274,24 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 // Read blocks until a packet is received over the connection, or until the
 // session is closed or the read times out, in which case an error is returned.
 func (conn *Conn) Read(b []byte) (n int, err error) {
-	select {
-	case pk := <-conn.packets:
-		if len(b) < len(*pk) {
-			err = conn.error(ErrBufferTooSmall, "read")
-		}
-		return copy(b, *pk), err
-	case <-conn.closed:
+	pk, ok := conn.packets.Recv(conn.closed)
+	if !ok {
 		return 0, conn.error(net.ErrClosed, "read")
+	} else if len(b) < len(pk) {
+		return 0, conn.error(ErrBufferTooSmall, "read")
 	}
+	return copy(b, pk), err
 }
 
 // ReadPacket attempts to read the next packet as a byte slice. ReadPacket
 // blocks until a packet is received over the connection, or until the session
 // is closed or the read times out, in which case an error is returned.
 func (conn *Conn) ReadPacket() (b []byte, err error) {
-	select {
-	case pk := <-conn.packets:
-		return *pk, err
-	case <-conn.closed:
+	pk, ok := conn.packets.Recv(conn.closed)
+	if !ok {
 		return nil, conn.error(net.ErrClosed, "read")
 	}
+	return pk, err
 }
 
 // Close closes the connection. All blocking Read or Write actions are
@@ -377,12 +375,6 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 		return fmt.Errorf("read datagram: %w", io.ErrUnexpectedEOF)
 	}
 	seq := loadUint24(b)
-	conn.ackMu.Lock()
-	// Add this sequence number to the received datagrams, so that it is
-	// included in an ACK.
-	conn.ackSlice = append(conn.ackSlice, seq)
-	conn.ackMu.Unlock()
-
 	if !conn.win.add(seq) {
 		// Datagram was already received, this might happen if a packet took a
 		// long time to arrive, and we already sent a NACK for it. This is
@@ -390,6 +382,12 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 		// to return an error.
 		return nil
 	}
+	conn.ackMu.Lock()
+	// Add this sequence number to the received datagrams, so that it is
+	// included in an ACK.
+	conn.ackSlice = append(conn.ackSlice, seq)
+	conn.ackMu.Unlock()
+
 	if conn.win.shift() == 0 {
 		// Datagram window couldn't be shifted up, so we're still missing
 		// packets.
@@ -463,13 +461,7 @@ func (conn *Conn) handlePacket(b []byte) error {
 		return fmt.Errorf("handle packet: %w", err)
 	}
 	if !handled {
-		// Insert the packet contents the packet queue could release in the
-		// channel so that Conn.Read() can get a hold of them, but always first
-		// try to escape if the connection was closed.
-		select {
-		case <-conn.closed:
-		case conn.packets <- &b:
-		}
+		conn.packets.Send(b)
 	}
 	return nil
 }
