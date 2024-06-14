@@ -394,7 +394,7 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 		rtt := time.Duration(conn.rtt.Load())
 		if missing := conn.win.missing(rtt + rtt/2); len(missing) > 0 {
 			if err := conn.sendNACK(missing); err != nil {
-				return fmt.Errorf("receive datagram: send NACK: %v", err)
+				return fmt.Errorf("receive datagram: send NACK: %w", err)
 			}
 		}
 	}
@@ -409,7 +409,7 @@ func (conn *Conn) handleDatagram(b []byte) error {
 	for len(b) > 0 {
 		n, err := conn.pk.read(b)
 		if err != nil {
-			return fmt.Errorf("handle datagram: read packet: %v", err)
+			return fmt.Errorf("handle datagram: read packet: %w", err)
 		}
 		b = b[n:]
 
@@ -418,7 +418,7 @@ func (conn *Conn) handleDatagram(b []byte) error {
 			handle = conn.receiveSplitPacket
 		}
 		if err := handle(conn.pk); err != nil {
-			return fmt.Errorf("handle datagram: receive packet: %v", err)
+			return fmt.Errorf("handle datagram: receive packet: %w", err)
 		}
 	}
 	return nil
@@ -538,7 +538,7 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 		// the next of the packets in a new ACK.
 		ack.packets = ack.packets[n:]
 		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.raddr); err != nil {
-			return fmt.Errorf("send acknowlegement: %v", err)
+			return fmt.Errorf("send acknowlegement: %w", err)
 		}
 		buf.Reset()
 	}
@@ -554,7 +554,7 @@ func (conn *Conn) handleACK(b []byte) error {
 
 	ack := &acknowledgement{}
 	if err := ack.read(b); err != nil {
-		return fmt.Errorf("read ACK: %v", err)
+		return fmt.Errorf("read ACK: %w", err)
 	}
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
@@ -576,7 +576,7 @@ func (conn *Conn) handleNACK(b []byte) error {
 
 	nack := &acknowledgement{}
 	if err := nack.read(b); err != nil {
-		return fmt.Errorf("read NACK: %v", err)
+		return fmt.Errorf("read NACK: %w", err)
 	}
 	return conn.resend(nack.packets)
 }
@@ -606,7 +606,7 @@ func (conn *Conn) sendDatagram(pk *packet) error {
 
 	// We then send the pk to the connection.
 	if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
-		return fmt.Errorf("send datagram: write to %v: %v", conn.raddr, err)
+		return fmt.Errorf("send datagram: write to %v: %w", conn.raddr, err)
 	}
 	// We then re-add the pk to the recovery queue in case the new one gets
 	// lost too, in which case we need to resend it again.

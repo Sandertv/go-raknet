@@ -378,7 +378,7 @@ func (state *connState) openConnection(ctx context.Context) error {
 		}
 		pk := &message.OpenConnectionReply2{}
 		if err = pk.UnmarshalBinary(b[1:n]); err != nil {
-			return fmt.Errorf("read open connection reply 2: %v", err)
+			return fmt.Errorf("read open connection reply 2: %w", err)
 		}
 		state.mtu = pk.MTU
 		return nil
