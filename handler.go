@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/sandertv/go-raknet/internal/message"
 	"hash/crc32"
+	"log/slog"
 	"net"
 	"time"
 )
@@ -14,6 +15,7 @@ type connectionHandler interface {
 	handle(conn *Conn, b []byte) (handled bool, err error)
 	limitsEnabled() bool
 	close(conn *Conn)
+	log() *slog.Logger
 }
 
 type listenerConnectionHandler struct {
@@ -25,6 +27,10 @@ var (
 	errUnexpectedCRA           = errors.New("unexpected CONNECTION_REQUEST_ACCEPTED packet")
 	errUnexpectedAdditionalNIC = errors.New("unexpected additional NEW_INCOMING_CONNECTION packet")
 )
+
+func (h listenerConnectionHandler) log() *slog.Logger {
+	return h.l.conf.ErrorLog
+}
 
 func (h listenerConnectionHandler) limitsEnabled() bool {
 	return true
@@ -185,13 +191,17 @@ func (h listenerConnectionHandler) handleNewIncomingConnection(conn *Conn) error
 	return nil
 }
 
-type dialerConnectionHandler struct{}
+type dialerConnectionHandler struct{ l *slog.Logger }
 
 var (
 	errUnexpectedCR            = errors.New("unexpected CONNECTION_REQUEST packet")
 	errUnexpectedAdditionalCRA = errors.New("unexpected additional CONNECTION_REQUEST_ACCEPTED packet")
 	errUnexpectedNIC           = errors.New("unexpected NEW_INCOMING_CONNECTION packet")
 )
+
+func (h dialerConnectionHandler) log() *slog.Logger {
+	return h.l
+}
 
 func (h dialerConnectionHandler) close(conn *Conn) {
 	_ = conn.conn.Close()

@@ -537,7 +537,7 @@ func (conn *Conn) sendAcknowledgement(packets []uint24, bitflag byte, buf *bytes
 		// We managed to write n packets in the ACK with this MTU size, write
 		// the next of the packets in a new ACK.
 		ack.packets = ack.packets[n:]
-		if _, err := conn.conn.WriteTo(buf.Bytes(), conn.raddr); err != nil {
+		if err := conn.writeTo(buf.Bytes(), conn.raddr); err != nil {
 			return fmt.Errorf("send acknowlegement: %w", err)
 		}
 		buf.Reset()
@@ -603,15 +603,28 @@ func (conn *Conn) sendDatagram(pk *packet) error {
 	seq := conn.seq.Inc()
 	writeUint24(conn.buf, seq)
 	pk.write(conn.buf)
+	defer conn.buf.Reset()
 
-	// We then send the pk to the connection.
-	if _, err := conn.conn.WriteTo(conn.buf.Bytes(), conn.raddr); err != nil {
-		return fmt.Errorf("send datagram: write to %v: %w", conn.raddr, err)
-	}
 	// We then re-add the pk to the recovery queue in case the new one gets
 	// lost too, in which case we need to resend it again.
 	conn.retransmission.add(seq, pk)
-	conn.buf.Reset()
+
+	if err := conn.writeTo(conn.buf.Bytes(), conn.raddr); err != nil {
+		return fmt.Errorf("send datagram: %w", err)
+	}
+	return nil
+}
+
+// writeTo calls WriteTo on the underlying UDP connection and returns an error
+// only if the error returned is net.ErrClosed. In any other case, the error
+// is logged but not returned. This is done because at this stage, packets
+// being lost to an error can be recovered through resending.
+func (conn *Conn) writeTo(p []byte, raddr net.Addr) error {
+	if _, err := conn.conn.WriteTo(p, raddr); errors.Is(err, net.ErrClosed) {
+		return fmt.Errorf("write to: %w", err)
+	} else if err != nil {
+		conn.handler.log().Error("write to: " + err.Error())
+	}
 	return nil
 }
 

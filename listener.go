@@ -1,6 +1,7 @@
 package raknet
 
 import (
+	"errors"
 	"fmt"
 	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
@@ -182,7 +183,7 @@ func (listener *Listener) listen() {
 		} else if n == 0 || listener.sec.blocked(addr) {
 			continue
 		}
-		if err = listener.handle(b[:n], addr); err != nil {
+		if err = listener.handle(b[:n], addr); err != nil && !errors.Is(err, net.ErrClosed) {
 			listener.conf.ErrorLog.Error("listener: handle packet: "+err.Error(), "address", addr.String(), "block-duration", max(0, listener.conf.BlockDuration))
 			listener.sec.block(addr)
 		}

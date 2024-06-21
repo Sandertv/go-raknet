@@ -233,7 +233,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 // dial finishes the RakNet connection sequence and returns a Conn if
 // successful.
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{})
+	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{l: dialer.ErrorLog})
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTime: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
@@ -259,17 +259,15 @@ func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 	b := make([]byte, rakConn.effectiveMTU())
 	for {
 		n, err := conn.Read(b)
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				// Errors reading a packet other than the connection being
-				// may be worth logging.
-				dialer.ErrorLog.Error("client: read packet: " + err.Error())
-			}
-			return
-		} else if n == 0 {
-			continue
+		if err == nil && n != 0 {
+			err = rakConn.receive(b[:n])
 		}
-		if err := rakConn.receive(b[:n]); err != nil {
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Errors reading a packet other than the connection being
+			// closed may be worth logging.
 			dialer.ErrorLog.Error("client: " + err.Error())
 		}
 	}
