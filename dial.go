@@ -218,6 +218,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	if err != nil {
 		return nil, dialer.error("dial", err)
 	}
+	dialer.ErrorLog = dialer.ErrorLog.With("src", "dialer", "raddr", conn.RemoteAddr().String())
 
 	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
 	defer cs.ticker.Stop()
@@ -268,7 +269,7 @@ func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 			}
 			// Errors reading a packet other than the connection being
 			// closed may be worth logging.
-			dialer.ErrorLog.Error("client: " + err.Error())
+			dialer.ErrorLog.Error("handle packet: " + err.Error())
 		}
 	}
 }

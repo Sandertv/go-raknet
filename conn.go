@@ -456,6 +456,10 @@ func (conn *Conn) handlePacket(b []byte) error {
 	if len(b) == 0 {
 		return errZeroPacket
 	}
+	if conn.closing.Load() != 0 {
+		// Don't continue handling packets if the connection is being closed.
+		return nil
+	}
 	handled, err := conn.handler.handle(conn, b)
 	if err != nil {
 		return fmt.Errorf("handle packet: %w", err)
@@ -623,7 +627,7 @@ func (conn *Conn) writeTo(p []byte, raddr net.Addr) error {
 	if _, err := conn.conn.WriteTo(p, raddr); errors.Is(err, net.ErrClosed) {
 		return fmt.Errorf("write to: %w", err)
 	} else if err != nil {
-		conn.handler.log().Error("write to: " + err.Error())
+		conn.handler.log().Error("write to: "+err.Error(), "raddr", raddr.String())
 	}
 	return nil
 }
