@@ -25,17 +25,16 @@ func (pk *ConnectionRequestAccepted) UnmarshalBinary(data []byte) error {
 	pk.SystemIndex = binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	for i := range 20 {
-		if len(data) < addrSize(data[offset:]) {
+		if len(data[offset:]) == 16 {
+			// Some implementations send fewer system addresses.
+			break
+		}
+		if len(data[offset:]) < addrSize(data[offset:]) {
 			return io.ErrUnexpectedEOF
 		}
 		address, n := addr(data[offset:])
 		pk.SystemAddresses[i] = address
 		offset += n
-
-		if len(data[offset:]) == 16 {
-			// Some implementations send only 10 system addresses.
-			break
-		}
 	}
 	if len(data[offset:]) < 16 {
 		return io.ErrUnexpectedEOF
