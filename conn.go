@@ -309,6 +309,15 @@ func (conn *Conn) closeImmediately() {
 		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
 		conn.handler.close(conn)
 		close(conn.closed)
+
+		conn.mu.Lock()
+		defer conn.mu.Unlock()
+		// Make sure to return all unacknowledged packets to the packet pool.
+		for _, record := range conn.retransmission.unacknowledged {
+			record.pk.content = record.pk.content[:0]
+			packetPool.Put(record.pk)
+		}
+		clear(conn.retransmission.unacknowledged)
 	})
 }
 
