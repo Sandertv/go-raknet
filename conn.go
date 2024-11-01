@@ -101,7 +101,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		pk:             new(packet),
 		closed:         make(chan struct{}),
 		connected:      make(chan struct{}),
-		packets:        internal.Chan[[]byte](4),
+		packets:        internal.Chan[[]byte](4, 4096),
 		splits:         make(map[uint16][][]byte),
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
