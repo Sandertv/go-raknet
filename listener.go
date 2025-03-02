@@ -3,7 +3,6 @@ package raknet
 import (
 	"errors"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
 	"maps"
 	"math"
@@ -12,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal"
 )
 
 // UpstreamPacketListener allows for a custom PacketListener implementation.
@@ -179,18 +180,22 @@ func (listener *Listener) listen() {
 	b := make([]byte, 1500)
 	for {
 		n, addr, err := listener.conn.ReadFrom(b)
+		addrStr := "unknown"
+		if addr != nil {
+			addrStr = addr.String()
+		}
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				close(listener.incoming)
 				return
 			}
-			listener.conf.ErrorLog.Error("read from: "+err.Error())
+			listener.conf.ErrorLog.Error("read from: "+err.Error(), "raddr", addrStr)
 			continue
 		} else if n == 0 || listener.sec.blocked(addr) {
 			continue
 		}
 		if err = listener.handle(b[:n], addr); err != nil && !errors.Is(err, net.ErrClosed) {
-			listener.conf.ErrorLog.Error("handle packet: "+err.Error(), "raddr", addr.String(), "block-duration", max(0, listener.conf.BlockDuration))
+			listener.conf.ErrorLog.Error("handle packet: "+err.Error(), "raddr", addrStr, "block-duration", max(0, listener.conf.BlockDuration))
 			listener.sec.block(addr)
 		}
 	}
