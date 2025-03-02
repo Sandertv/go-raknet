@@ -43,10 +43,10 @@ func putAddr(b []byte, addrPort netip.AddrPort) int {
 	} else {
 		ip16 := addr.As16()
 		b[0] = 6
-		binary.LittleEndian.PutUint16(b[1:], uint16(23)) // syscall.AF_INET6 on Windows.
-		binary.BigEndian.PutUint16(b[3:], port)
+		binary.BigEndian.PutUint16(b[3:], uint16(23)) // syscall.AF_INET6 on Windows.
+		binary.BigEndian.PutUint16(b[5:], port)
 		// 4 bytes.
-		copy(b[9:], ip16[:])
+		copy(b[11:], ip16[:])
 		// 4 bytes.
 		return sizeofAddr6
 	}
@@ -58,8 +58,8 @@ func addr(b []byte) (netip.AddrPort, int) {
 		port := binary.BigEndian.Uint16(b[5:])
 		return netip.AddrPortFrom(ip, port), sizeofAddr4
 	} else {
-		port := binary.BigEndian.Uint16(b[3:])
-		ip := netip.AddrFrom16([16]byte(b[9:]))
+		port := binary.BigEndian.Uint16(b[5:])
+		ip := netip.AddrFrom16([16]byte(b[11:]))
 		return netip.AddrPortFrom(ip, port), sizeofAddr6
 	}
 }
