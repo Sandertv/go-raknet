@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
 	"math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal"
 
 	"github.com/sandertv/go-raknet/internal/message"
 )
@@ -223,9 +224,9 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
 	defer cs.ticker.Stop()
 	if err = cs.discoverMTU(ctx); err != nil {
-		return nil, dialer.error("dial", err)
+		return nil, dialer.error("dial", fmt.Errorf("discover mtu: %w", err))
 	} else if err = cs.openConnection(ctx); err != nil {
-		return nil, dialer.error("dial", err)
+		return nil, dialer.error("dial", fmt.Errorf("open connection: %w", err))
 	}
 
 	return dialer.connect(ctx, cs)
