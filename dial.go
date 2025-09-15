@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sandertv/go-raknet/internal"
@@ -97,6 +98,14 @@ type Dialer struct {
 	// UpstreamDialer is a dialer that will override the default dialer for
 	// opening outgoing connections. The default is a net.Dial("udp", ...).
 	UpstreamDialer UpstreamDialer
+
+	// MaxTransientErrors is the maximum number of transient errors to ignore
+	// before returning an error. These include errors that can occur on
+	// bad connections such as ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, ECONNRESET.
+	// If there is no limit it will continue to retry reading until the context deadline.
+	// Default is 10. -1 means no limit.
+	// This is only used for the initial connection handshake.
+	MaxTransientErrors int8
 }
 
 // Ping sends a ping to an address and returns the response obtained. If
@@ -214,6 +223,9 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	if dialer.ErrorLog == nil {
 		dialer.ErrorLog = slog.New(internal.DiscardHandler{})
 	}
+	if dialer.MaxTransientErrors == 0 {
+		dialer.MaxTransientErrors = 10
+	}
 
 	conn, err := dialer.dial(ctx, address)
 	if err != nil {
@@ -221,7 +233,13 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	}
 	dialer.ErrorLog = dialer.ErrorLog.With("src", "dialer", "raddr", conn.RemoteAddr().String())
 
-	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
+	cs := &connState{
+		conn:               conn,
+		raddr:              conn.RemoteAddr(),
+		id:                 atomic.AddInt64(&dialerID, 1),
+		ticker:             time.NewTicker(time.Second / 2),
+		maxTransientErrors: dialer.MaxTransientErrors,
+	}
 	defer cs.ticker.Stop()
 	if err = cs.discoverMTU(ctx); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("discover mtu: %w", err))
@@ -290,6 +308,9 @@ type connState struct {
 	cookie         uint32
 
 	ticker *time.Ticker
+
+	transientErrorCount int8
+	maxTransientErrors  int8
 }
 
 var mtuSizes = []uint16{1492, 1200, 576}
@@ -308,9 +329,16 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 		// Start reading in a loop so that we can find an open connection reply
 		// 1 packet.
 		n, err := state.conn.Read(b)
-		if err != nil || n == 0 {
+		if err != nil {
+			if isTransientUDPReadError(err) && (state.maxTransientErrors == -1 || state.transientErrorCount < state.maxTransientErrors) {
+				state.transientErrorCount++
+				continue
+			}
 			state.close()
 			return err
+		}
+		if n == 0 {
+			continue
 		}
 		switch b[0] {
 		case message.IDOpenConnectionReply1:
@@ -369,9 +397,16 @@ func (state *connState) openConnection(ctx context.Context) error {
 		// Start reading in a loop so that we can find open connection reply 2
 		// packets.
 		n, err := state.conn.Read(b)
-		if err != nil || n == 0 {
+		if err != nil {
+			if isTransientUDPReadError(err) && (state.maxTransientErrors == -1 || state.transientErrorCount < state.maxTransientErrors) {
+				state.transientErrorCount++
+				continue
+			}
 			state.close()
 			return err
+		}
+		if n == 0 {
+			continue
 		}
 		if b[0] != message.IDOpenConnectionReply2 {
 			continue
@@ -422,4 +457,21 @@ func (state *connState) openConnectionRequest2(mtu uint16) {
 // close closes the underlying connection.
 func (state *connState) close() {
 	_ = state.conn.Close()
+}
+
+// isTransientUDPReadError returns true for read errors on connected UDP sockets
+// commonly caused by ICMP errors. These may be due to lossy client networks or
+// normal transient conditions, and are safe to retry during the handshake.
+func isTransientUDPReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.ECONNRESET:
+			return true
+		}
+	}
+	return false
 }
