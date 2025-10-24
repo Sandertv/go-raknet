@@ -6,8 +6,6 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal"
-	"github.com/sandertv/go-raknet/internal/message"
 	"io"
 	"net"
 	"net/netip"
@@ -15,7 +13,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal"
+	"github.com/sandertv/go-raknet/internal/message"
 )
+
+var startTime = time.Now()
 
 const (
 	// protocolVersion is the current RakNet protocol version. This is Minecraft
@@ -657,5 +660,5 @@ func (conn *Conn) writeTo(p []byte, raddr net.Addr) error {
 
 // timestamp returns a timestamp in milliseconds.
 func timestamp() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
+	return time.Since(startTime).Milliseconds()
 }

@@ -180,7 +180,7 @@ func (dialer Dialer) dial(ctx context.Context, address string) (net.Conn, error)
 }
 
 // dialerID is a counter used to produce an ID for the client.
-var dialerID = rand.Int64()
+var dialerID = int64(rand.Uint64())
 
 // Dial attempts to dial a RakNet connection to the address passed. The address
 // may be either an IP address or a hostname, combined with a port that is
