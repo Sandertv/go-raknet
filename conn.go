@@ -224,15 +224,6 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 	return conn.writeWithReliability(b, reliabilityReliableOrdered)
 }
 
-// WriteUnreliable writes a buffer b over the RakNet connection using unreliable
-// delivery. The amount of bytes written n is always equal to the length of the
-// bytes written if writing was successful. If not, an error is returned and n
-// is 0. WriteUnreliable may be called simultaneously from multiple goroutines,
-// but will write one by one.
-func (conn *Conn) WriteUnreliable(b []byte) (n int, err error) {
-	return conn.writeWithReliability(b, reliabilityUnreliable)
-}
-
 // writeWithReliability writes a buffer b over the RakNet connection using the
 // reliability passed. The amount of bytes written n is always equal to the
 // length of the bytes written if writing was successful. If not, an error is
@@ -398,7 +389,7 @@ func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 // unreliable reliability.
 func (conn *Conn) sendUnreliable(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
-	_, err := conn.WriteUnreliable(b)
+	_, err := conn.writeWithReliability(b, reliabilityUnreliable)
 	return err
 }
 
