@@ -151,35 +151,15 @@ func (pk *packet) read(b []byte) (int, error) {
 }
 
 func (pk *packet) reliable() bool {
-	switch pk.reliability {
-	case reliabilityReliable,
-		reliabilityReliableOrdered,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
+	return reliabilityHasMessageIndex(pk.reliability)
 }
 
 func (pk *packet) sequencedOrOrdered() bool {
-	switch pk.reliability {
-	case reliabilityUnreliableSequenced,
-		reliabilityReliableOrdered,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
+	return reliabilityHasOrderIndex(pk.reliability)
 }
 
 func (pk *packet) sequenced() bool {
-	switch pk.reliability {
-	case reliabilityUnreliableSequenced,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
+	return reliabilityHasSequenceIndex(pk.reliability)
 }
 
 const (
@@ -219,4 +199,42 @@ func split(b []byte, mtu uint16) [][]byte {
 	}
 	fragments[len(fragments)-1] = b
 	return fragments
+}
+
+// reliabilityHasMessageIndex checks whether the reliability requires a
+// message index.
+func reliabilityHasMessageIndex(reliability byte) bool {
+	switch reliability {
+	case reliabilityReliable,
+		reliabilityReliableOrdered,
+		reliabilityReliableSequenced:
+		return true
+	default:
+		return false
+	}
+}
+
+// reliabilityHasSequenceIndex checks whether the reliability requires a
+// sequence index.
+func reliabilityHasSequenceIndex(reliability byte) bool {
+	switch reliability {
+	case reliabilityUnreliableSequenced,
+		reliabilityReliableSequenced:
+		return true
+	default:
+		return false
+	}
+}
+
+// reliabilityHasOrderIndex checks whether the reliability requires an
+// order index.
+func reliabilityHasOrderIndex(reliability byte) bool {
+	switch reliability {
+	case reliabilityUnreliableSequenced,
+		reliabilityReliableOrdered,
+		reliabilityReliableSequenced:
+		return true
+	default:
+		return false
+	}
 }

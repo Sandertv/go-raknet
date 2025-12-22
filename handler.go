@@ -262,7 +262,7 @@ func handleConnectedPing(conn *Conn, b []byte) error {
 	}
 	// Respond with a connected pong that has the ping timestamp found in the
 	// connected ping, and our own timestamp for the pong timestamp.
-	return conn.send(&message.ConnectedPong{PingTime: pk.PingTime, PongTime: timestamp()})
+	return conn.sendUnreliable(&message.ConnectedPong{PingTime: pk.PingTime, PongTime: timestamp()})
 }
 
 // handleConnectedPong handles a connected pong packet inside of buffer b. An

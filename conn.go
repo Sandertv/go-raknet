@@ -250,10 +250,8 @@ func (conn *Conn) writeWithReliability(b []byte, reliability byte) (n int, err e
 func (conn *Conn) write(b []byte, reliability byte) (n int, err error) {
 	fragments := split(b, conn.effectiveMTU())
 	var orderIndex uint24
-	switch reliability {
-	case reliabilityUnreliableSequenced, reliabilityReliableOrdered, reliabilityReliableSequenced:
-		orderIndex = conn.orderIndex.Inc()
-	default:
+	if reliabilityHasOrderIndex(reliability) {
+		orderIndex = conn.orderIndex
 	}
 
 	splitID := uint16(conn.splitID)
@@ -273,7 +271,7 @@ func (conn *Conn) write(b []byte, reliability byte) (n int, err error) {
 
 		pk.orderIndex = orderIndex
 		pk.reliability = reliability
-		if pk.sequencedOrOrdered() {
+		if pk.reliable() {
 			pk.messageIndex = conn.messageIndex.Inc()
 		}
 		if pk.split = len(fragments) > 1; pk.split {
