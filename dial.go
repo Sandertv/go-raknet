@@ -8,7 +8,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/sandertv/go-raknet/internal"
@@ -105,7 +104,7 @@ type Dialer struct {
 	// If there is no limit it will continue to retry reading until the context deadline.
 	// Default is 10. -1 means no limit.
 	// This is only used for the initial connection handshake.
-	MaxTransientErrors int8
+	MaxTransientErrors int
 }
 
 // Ping sends a ping to an address and returns the response obtained. If
@@ -309,8 +308,8 @@ type connState struct {
 
 	ticker *time.Ticker
 
-	transientErrorCount int8
-	maxTransientErrors  int8
+	transientErrorCount int
+	maxTransientErrors  int
 }
 
 var mtuSizes = []uint16{1492, 1200, 576}
@@ -457,21 +456,4 @@ func (state *connState) openConnectionRequest2(mtu uint16) {
 // close closes the underlying connection.
 func (state *connState) close() {
 	_ = state.conn.Close()
-}
-
-// isTransientUDPReadError returns true for read errors on connected UDP sockets
-// commonly caused by ICMP errors. These may be due to lossy client networks or
-// normal transient conditions, and are safe to retry during the handshake.
-func isTransientUDPReadError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.ECONNRESET:
-			return true
-		}
-	}
-	return false
 }
