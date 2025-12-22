@@ -3,7 +3,6 @@ package raknet
 import (
 	"errors"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal"
 	"log/slog"
 	"maps"
 	"math"
@@ -12,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal"
 )
 
 // UpstreamPacketListener allows for a custom PacketListener implementation.
@@ -143,6 +144,11 @@ func (listener *Listener) Addr() net.Addr {
 	return listener.conn.LocalAddr()
 }
 
+// Block blocks incoming network packets from being processed by the Listener.
+func (listener *Listener) Block(addr net.Addr) {
+	listener.sec.block(addr)
+}
+
 // Close closes the listener so that it may be cleaned up. It makes sure the
 // goroutine handling incoming packets is able to be freed.
 func (listener *Listener) Close() error {
@@ -188,7 +194,7 @@ func (listener *Listener) listen() {
 				close(listener.incoming)
 				return
 			}
-			listener.conf.ErrorLog.Error("read from: " + err.Error(), "raddr", addrStr)
+			listener.conf.ErrorLog.Error("read from: "+err.Error(), "raddr", addrStr)
 			continue
 		} else if n == 0 || listener.sec.blocked(addr) {
 			continue
