@@ -252,14 +252,17 @@ func newSecurity(conf ListenConfig, h *listenerConnectionHandler) *security {
 func (s *security) tick(stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	i := 0
 
 	for {
 		select {
 		case <-ticker.C:
 			s.gcBlocks()
-			// Update salt used to produce cookies every 2s.
-			s.h.previousSalt.Store(s.h.cookieSalt.Load())
-			s.h.cookieSalt.Store(rand.Uint64())
+			if i++; i%2 == 0 {
+				// Update salt used to produce cookies every 2s.
+				s.h.previousSalt.Store(s.h.cookieSalt.Load())
+				s.h.cookieSalt.Store(rand.Uint64())
+			}
 		case <-stop:
 			return
 		}
