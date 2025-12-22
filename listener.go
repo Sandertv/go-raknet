@@ -106,13 +106,13 @@ func (conf ListenConfig) Listen(address string) (*Listener, error) {
 		incoming: make(chan *Conn),
 		closed:   make(chan struct{}),
 		id:       atomic.AddInt64(&listenerID, 1),
-		sec:      newSecurity(conf),
 	}
-	listener.handler = &listenerConnectionHandler{l: listener, cookieSalt: rand.Uint32()}
+	listener.handler = &listenerConnectionHandler{l: listener, cookieSalt: &atomic.Uint64{}, previousSalt: &atomic.Uint64{}}
+	listener.sec = newSecurity(conf, listener.handler)
 	listener.pongData.Store(new([]byte))
 
 	go listener.listen()
-	go listener.sec.gc(listener.closed)
+	go listener.sec.tick(listener.closed)
 	return listener, nil
 }
 
@@ -231,6 +231,7 @@ func (listener *Listener) handle(b []byte, addr net.Addr) error {
 // Listener.
 type security struct {
 	conf ListenConfig
+	h    *listenerConnectionHandler
 
 	blockCount atomic.Uint32
 
@@ -239,13 +240,16 @@ type security struct {
 }
 
 // newSecurity uses settings from a ListenConfig to create a security.
-func newSecurity(conf ListenConfig) *security {
-	return &security{conf: conf, blocks: make(map[[16]byte]time.Time)}
+func newSecurity(conf ListenConfig, h *listenerConnectionHandler) *security {
+	h.cookieSalt.Store(rand.Uint64())
+	h.previousSalt.Store(rand.Uint64())
+	return &security{h: h, conf: conf, blocks: make(map[[16]byte]time.Time)}
 }
 
-// gc clears garbage from the security layer every second until the stop channel
-// passed is closed.
-func (s *security) gc(stop <-chan struct{}) {
+// tick clears garbage from the security layer every second until the stop
+// channel passed is closed. Additionally, it updates the salt used for
+// cookies.
+func (s *security) tick(stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -253,6 +257,9 @@ func (s *security) gc(stop <-chan struct{}) {
 		select {
 		case <-ticker.C:
 			s.gcBlocks()
+			// Update salt used to produce cookies every 2s.
+			s.h.previousSalt.Store(s.h.cookieSalt.Load())
+			s.h.cookieSalt.Store(rand.Uint64())
 		case <-stop:
 			return
 		}
