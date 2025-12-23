@@ -52,7 +52,7 @@ func (h listenerConnectionHandler) cookie(addr net.Addr, salt uint64) uint32 {
 	udp, _ := addr.(*net.UDPAddr)
 	b := make([]byte, 10, 26)
 	binary.LittleEndian.PutUint64(b, salt)
-	binary.LittleEndian.PutUint16(b, uint16(udp.Port))
+	binary.LittleEndian.PutUint16(b[8:], uint16(udp.Port))
 	b = append(b, udp.IP...)
 	// CRC32 isn't cryptographically secure, but we don't really need that here.
 	// A new salt is calculated every time a Listener is created and we don't
