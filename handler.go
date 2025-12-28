@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/sandertv/go-raknet/internal/message"
@@ -20,8 +21,9 @@ type connectionHandler interface {
 }
 
 type listenerConnectionHandler struct {
-	l          *Listener
-	cookieSalt uint32
+	l            *Listener
+	cookieSalt   *atomic.Uint64
+	previousSalt *atomic.Uint64
 }
 
 var (
@@ -43,14 +45,14 @@ func (h listenerConnectionHandler) close(conn *Conn) {
 
 // cookie calculates a cookie for the net.Addr passed. It is calculated as a
 // hash of the random cookie salt and the address.
-func (h listenerConnectionHandler) cookie(addr net.Addr) uint32 {
+func (h listenerConnectionHandler) cookie(addr net.Addr, salt uint64) uint32 {
 	if h.l.conf.DisableCookies {
 		return 0
 	}
 	udp, _ := addr.(*net.UDPAddr)
-	b := make([]byte, 6, 22)
-	binary.LittleEndian.PutUint32(b, h.cookieSalt)
-	binary.LittleEndian.PutUint16(b, uint16(udp.Port))
+	b := make([]byte, 10, 26)
+	binary.LittleEndian.PutUint64(b, salt)
+	binary.LittleEndian.PutUint16(b[8:], uint16(udp.Port))
 	b = append(b, udp.IP...)
 	// CRC32 isn't cryptographically secure, but we don't really need that here.
 	// A new salt is calculated every time a Listener is created and we don't
@@ -104,7 +106,7 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest1(b []byte, addr n
 		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_1: incompatible protocol version %v (listener protocol = %v)", pk.ClientProtocol, protocolVersion)
 	}
 
-	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, Cookie: h.cookie(addr), ServerHasSecurity: !h.l.conf.DisableCookies, MTU: mtuSize}).MarshalBinary()
+	data, _ := (&message.OpenConnectionReply1{ServerGUID: h.l.id, Cookie: h.cookie(addr, h.cookieSalt.Load()), ServerHasSecurity: !h.l.conf.DisableCookies, MTU: mtuSize}).MarshalBinary()
 	_, err := h.l.conn.WriteTo(data, addr)
 	return err
 }
@@ -116,7 +118,8 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read OPEN_CONNECTION_REQUEST_2: %w", err)
 	}
-	if expected := h.cookie(addr); pk.Cookie != expected {
+	if expected := h.cookie(addr, h.cookieSalt.Load()); pk.Cookie != expected &&
+		pk.Cookie != h.cookie(addr, h.previousSalt.Load()) {
 		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid cookie '%x', expected '%x'", pk.Cookie, expected)
 	}
 	mtuSize := min(pk.MTU, maxMTUSize)
