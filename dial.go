@@ -245,7 +245,6 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	} else if err = cs.openConnection(ctx); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("open connection: %w", err))
 	}
-
 	return dialer.connect(ctx, cs)
 }
 

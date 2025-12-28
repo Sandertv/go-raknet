@@ -6,8 +6,6 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"github.com/sandertv/go-raknet/internal"
-	"github.com/sandertv/go-raknet/internal/message"
 	"io"
 	"net"
 	"net/netip"
@@ -15,6 +13,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sandertv/go-raknet/internal"
+	"github.com/sandertv/go-raknet/internal/message"
 )
 
 const (
@@ -221,13 +222,23 @@ func (conn *Conn) checkResend(now time.Time) {
 // successful. If not, an error is returned and n is 0. Write may be called
 // simultaneously from multiple goroutines, but will write one by one.
 func (conn *Conn) Write(b []byte) (n int, err error) {
+	return conn.writeWithReliability(b, reliabilityReliableOrdered)
+}
+
+// writeWithReliability writes a buffer b over the RakNet connection using the
+// reliability passed. The amount of bytes written n is always equal to the
+// length of the bytes written if writing was successful. If not, an error is
+// returned and n is 0. writeWithReliability may be called simultaneously from
+// multiple goroutines, but will write one by one. Unlike Write, it allows
+// specifying the reliability.
+func (conn *Conn) writeWithReliability(b []byte, rel reliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():
 		return 0, conn.error(net.ErrClosed, "write")
 	default:
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
-		n, err = conn.write(b)
+		n, err = conn.write(b, rel)
 		return n, conn.error(err, "write")
 	}
 }
@@ -237,9 +248,12 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 // was successful. If not, an error is returned and n is 0. Write may be called
 // simultaneously from multiple goroutines, but will write one by one. Unlike
 // Write, write will not lock.
-func (conn *Conn) write(b []byte) (n int, err error) {
+func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
 	fragments := split(b, conn.effectiveMTU())
-	orderIndex := conn.orderIndex.Inc()
+	var orderIndex uint24
+	if rel.sequencedOrOrdered() {
+		orderIndex = conn.orderIndex.Inc()
+	}
 
 	splitID := uint16(conn.splitID)
 	if len(fragments) > 1 {
@@ -257,7 +271,10 @@ func (conn *Conn) write(b []byte) (n int, err error) {
 		copy(pk.content, content)
 
 		pk.orderIndex = orderIndex
-		pk.messageIndex = conn.messageIndex.Inc()
+		pk.reliability = rel
+		if rel.reliable() {
+			pk.messageIndex = conn.messageIndex.Inc()
+		}
 		if pk.split = len(fragments) > 1; pk.split {
 			// If there were more than one fragment, the pk was split, so we
 			// need to make sure we set the appropriate fields.
@@ -364,6 +381,14 @@ func (conn *Conn) Latency() time.Duration {
 func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
 	_, err := conn.Write(b)
+	return err
+}
+
+// sendUnreliable encodes an encoding.BinaryMarshaler and writes it to the Conn using
+// unreliable reliability.
+func (conn *Conn) sendUnreliable(pk encoding.BinaryMarshaler) error {
+	b, _ := pk.MarshalBinary()
+	_, err := conn.writeWithReliability(b, reliabilityUnreliable)
 	return err
 }
 
@@ -632,9 +657,11 @@ func (conn *Conn) sendDatagram(pk *packet) error {
 	pk.write(conn.buf)
 	defer conn.buf.Reset()
 
-	// We then re-add the pk to the recovery queue in case the new one gets
-	// lost too, in which case we need to resend it again.
-	conn.retransmission.add(seq, pk)
+	if pk.reliability.reliable() {
+		// We then re-add the pk to the recovery queue in case the new one gets
+		// lost too, in which case we need to resend it again.
+		conn.retransmission.add(seq, pk)
+	}
 
 	if err := conn.writeTo(conn.buf.Bytes(), conn.raddr); err != nil {
 		return fmt.Errorf("send datagram: %w", err)

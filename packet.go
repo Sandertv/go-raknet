@@ -20,14 +20,13 @@ const (
 	bitFlagNeedsBAndAS = 0x04
 )
 
-// noinspection GoUnusedConst
 const (
 	// reliabilityUnreliable means that the packet sent could arrive out of
 	// order, be duplicated, or just not arrive at all. It is usually used for
 	// high frequency packets of which the order does not matter.
 	//lint:ignore U1000 While this constant is unused, it is here for the sake
 	// of having all reliabilities documented.
-	reliabilityUnreliable byte = iota
+	reliabilityUnreliable reliability = iota
 	// reliabilityUnreliableSequenced means that the packet sent could be
 	// duplicated or not arrive at all, but ensures that it is always handled in
 	// the right order.
@@ -48,10 +47,34 @@ const (
 	splitFlag = 0x10
 )
 
+type reliability byte
+
+// reliable checks packets with this reliability require a message index,
+// therefore meaning that packets are never received twice.
+func (r reliability) reliable() bool {
+	return r == reliabilityReliable ||
+		r == reliabilityReliableOrdered ||
+		r == reliabilityReliableSequenced
+}
+
+// sequenced checks whether packets with this reliability require a sequence
+// index, implying that unreceived older packets can be dropped if a newer one
+// has been received.
+func (r reliability) sequenced() bool {
+	return r == reliabilityUnreliableSequenced ||
+		r == reliabilityReliableSequenced
+}
+
+// sequencedOrOrdered checks whether packets with this reliability require an
+// order index, meaning packets are always received in correct order.
+func (r reliability) sequencedOrOrdered() bool {
+	return r.sequenced() || r == reliabilityReliableOrdered
+}
+
 // packet is an encapsulation around every packet sent after the connection is
 // established.
 type packet struct {
-	reliability byte
+	reliability reliability
 
 	messageIndex  uint24
 	sequenceIndex uint24
@@ -72,15 +95,15 @@ func (pk *packet) write(buf *bytes.Buffer) {
 		header |= splitFlag
 	}
 
-	buf.WriteByte(header)
+	buf.WriteByte(byte(header))
 	writeUint16(buf, uint16(len(pk.content))<<3)
-	if pk.reliable() {
+	if pk.reliability.reliable() {
 		writeUint24(buf, pk.messageIndex)
 	}
-	if pk.sequenced() {
+	if pk.reliability.sequenced() {
 		writeUint24(buf, pk.sequenceIndex)
 	}
-	if pk.sequencedOrOrdered() {
+	if pk.reliability.sequencedOrOrdered() {
 		writeUint24(buf, pk.orderIndex)
 		// Order channel, we don't care about this.
 		buf.WriteByte(0)
@@ -100,7 +123,7 @@ func (pk *packet) read(b []byte) (int, error) {
 	}
 	header := b[0]
 	pk.split = (header & splitFlag) != 0
-	pk.reliability = (header & 224) >> 5
+	pk.reliability = reliability((header & 224) >> 5)
 
 	n := binary.BigEndian.Uint16(b[1:]) >> 3
 	if n == 0 {
@@ -108,7 +131,7 @@ func (pk *packet) read(b []byte) (int, error) {
 	}
 	offset := 3
 
-	if pk.reliable() {
+	if pk.reliability.reliable() {
 		if len(b)-offset < 3 {
 			return 0, io.ErrUnexpectedEOF
 		}
@@ -116,7 +139,7 @@ func (pk *packet) read(b []byte) (int, error) {
 		offset += 3
 	}
 
-	if pk.sequenced() {
+	if pk.reliability.sequenced() {
 		if len(b)-offset < 3 {
 			return 0, io.ErrUnexpectedEOF
 		}
@@ -124,7 +147,7 @@ func (pk *packet) read(b []byte) (int, error) {
 		offset += 3
 	}
 
-	if pk.sequencedOrOrdered() {
+	if pk.reliability.sequencedOrOrdered() {
 		if len(b)-offset < 4 {
 			return 0, io.ErrUnexpectedEOF
 		}
@@ -148,38 +171,6 @@ func (pk *packet) read(b []byte) (int, error) {
 		return 0, io.ErrUnexpectedEOF
 	}
 	return offset + int(n), nil
-}
-
-func (pk *packet) reliable() bool {
-	switch pk.reliability {
-	case reliabilityReliable,
-		reliabilityReliableOrdered,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
-}
-
-func (pk *packet) sequencedOrOrdered() bool {
-	switch pk.reliability {
-	case reliabilityUnreliableSequenced,
-		reliabilityReliableOrdered,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
-}
-
-func (pk *packet) sequenced() bool {
-	switch pk.reliability {
-	case reliabilityUnreliableSequenced,
-		reliabilityReliableSequenced:
-		return true
-	default:
-		return false
-	}
 }
 
 const (
