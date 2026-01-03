@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
@@ -682,7 +683,15 @@ func (conn *Conn) writeTo(p []byte, raddr net.Addr) error {
 	return nil
 }
 
-// timestamp returns a timestamp in milliseconds.
+var (
+	// systemStart is the time the system was started.
+	// we are just randomly generating a believable timeframe as it's easier than getting the time the system was started.
+	// if we were to actually implement functions to get system uptime it would cause troubles with cross-platform compatability,
+	// and this should be good enough for most cases.
+	systemStart = time.Now().Add(-(time.Hour + time.Second*time.Duration(rand.IntN(1024*1024))))
+)
+
+// timestamp returns a timestamp since systemStart in milliseconds.
 func timestamp() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
+	return time.Since(systemStart).Milliseconds()
 }
