@@ -56,8 +56,9 @@ type Conn struct {
 
 	pk *packet
 
-	seq, orderIndex, messageIndex uint24
-	splitID                       uint32
+	seq, messageIndex uint24
+	orderIndex        [256]uint24
+	splitID           uint32
 
 	// mtu is the MTU size of the connection. Packets longer than this size
 	// must be split into fragments for them to arrive at the client without
@@ -80,9 +81,9 @@ type Conn struct {
 	// in an ACK and the slice is cleared.
 	ackSlice []uint24
 
-	// packetQueue is an ordered queue containing packets indexed by their order
-	// index.
-	packetQueue *packetQueue
+	// packetQueue is a set of ordered queues containing packets indexed by
+	// order channel and order index.
+	packetQueue *packetChannelQueue
 	// packets is a channel containing content of packets that were fully
 	// processed. Calling Conn.Read() consumes a value from this channel.
 	packets *internal.ElasticChan[[]byte]
@@ -108,7 +109,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		packets:        internal.Chan[[]byte](4, 4096),
 		splits:         make(map[uint16][][]byte),
 		win:            newDatagramWindow(),
-		packetQueue:    newPacketQueue(),
+		packetQueue:    newPacketChannelQueue(),
 		retransmission: newRecoveryQueue(),
 		buf:            bytes.NewBuffer(make([]byte, 0, mtu-28)), // - headers.
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 128)),
@@ -225,6 +226,12 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 	return conn.writeWithReliability(b, reliabilityReliableOrdered)
 }
 
+// WriteChannel writes a reliable ordered packet to a specific RakNet ordering
+// channel.
+func (conn *Conn) WriteChannel(b []byte, orderChannel byte) (n int, err error) {
+	return conn.writeWithReliabilityAndChannel(b, reliabilityReliableOrdered, orderChannel)
+}
+
 // writeWithReliability writes a buffer b over the RakNet connection using the
 // reliability passed. The amount of bytes written n is always equal to the
 // length of the bytes written if writing was successful. If not, an error is
@@ -232,13 +239,17 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 // multiple goroutines, but will write one by one. Unlike Write, it allows
 // specifying the reliability.
 func (conn *Conn) writeWithReliability(b []byte, rel reliability) (n int, err error) {
+	return conn.writeWithReliabilityAndChannel(b, rel, 0)
+}
+
+func (conn *Conn) writeWithReliabilityAndChannel(b []byte, rel reliability, orderChannel byte) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():
 		return 0, conn.error(net.ErrClosed, "write")
 	default:
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
-		n, err = conn.write(b, rel)
+		n, err = conn.write(b, rel, orderChannel)
 		return n, conn.error(err, "write")
 	}
 }
@@ -248,11 +259,11 @@ func (conn *Conn) writeWithReliability(b []byte, rel reliability) (n int, err er
 // was successful. If not, an error is returned and n is 0. Write may be called
 // simultaneously from multiple goroutines, but will write one by one. Unlike
 // Write, write will not lock.
-func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
+func (conn *Conn) write(b []byte, rel reliability, orderChannel byte) (n int, err error) {
 	fragments := split(b, conn.effectiveMTU())
 	var orderIndex uint24
 	if rel.sequencedOrOrdered() {
-		orderIndex = conn.orderIndex.Inc()
+		orderIndex = conn.orderIndex[orderChannel].Inc()
 	}
 
 	splitID := uint16(conn.splitID)
@@ -271,6 +282,11 @@ func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
 		copy(pk.content, content)
 
 		pk.orderIndex = orderIndex
+		if rel.sequencedOrOrdered() {
+			pk.orderChannel = orderChannel
+		} else {
+			pk.orderChannel = 0
+		}
 		pk.reliability = rel
 		if rel.reliable() {
 			pk.messageIndex = conn.messageIndex.Inc()
@@ -477,14 +493,19 @@ func (conn *Conn) receivePacket(packet *packet) error {
 		// If it isn't a reliable ordered packet, handle it immediately.
 		return conn.handlePacket(packet.content)
 	}
-	if !conn.packetQueue.put(packet.orderIndex, packet.content) {
+	if !conn.packetQueue.put(packet.orderChannel, packet.orderIndex, packet.content) {
 		// An ordered packet arrived twice.
 		return nil
 	}
-	if conn.packetQueue.WindowSize() > maxWindowSize && conn.handler.limitsEnabled() {
-		return fmt.Errorf("packet queue window size is too big (%v-%v)", conn.packetQueue.lowest, conn.packetQueue.highest)
+	totalWindowSize := conn.packetQueue.TotalWindowSize()
+	if totalWindowSize > maxWindowSize && conn.handler.limitsEnabled() {
+		lowest, highest := conn.packetQueue.WindowBounds(packet.orderChannel)
+		return fmt.Errorf(
+			"packet queue window size is too big (%v total, channel %v: %v-%v)",
+			totalWindowSize, packet.orderChannel, lowest, highest,
+		)
 	}
-	for _, content := range conn.packetQueue.fetch() {
+	for _, content := range conn.packetQueue.fetch(packet.orderChannel) {
 		if err := conn.handlePacket(content); err != nil {
 			return err
 		}

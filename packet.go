@@ -79,6 +79,7 @@ type packet struct {
 	messageIndex  uint24
 	sequenceIndex uint24
 	orderIndex    uint24
+	orderChannel  byte
 
 	content []byte
 
@@ -105,8 +106,7 @@ func (pk *packet) write(buf *bytes.Buffer) {
 	}
 	if pk.reliability.sequencedOrOrdered() {
 		writeUint24(buf, pk.orderIndex)
-		// Order channel, we don't care about this.
-		buf.WriteByte(0)
+		buf.WriteByte(pk.orderChannel)
 	}
 	if pk.split {
 		writeUint32(buf, pk.splitCount)
@@ -124,6 +124,7 @@ func (pk *packet) read(b []byte) (int, error) {
 	header := b[0]
 	pk.split = (header & splitFlag) != 0
 	pk.reliability = reliability((header & 224) >> 5)
+	pk.orderChannel = 0
 
 	n := binary.BigEndian.Uint16(b[1:]) >> 3
 	if n == 0 {
@@ -152,7 +153,7 @@ func (pk *packet) read(b []byte) (int, error) {
 			return 0, io.ErrUnexpectedEOF
 		}
 		pk.orderIndex = loadUint24(b[offset:])
-		// Order channel (byte)
+		pk.orderChannel = b[offset+3]
 		offset += 4
 	}
 
