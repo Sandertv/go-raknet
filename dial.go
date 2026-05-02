@@ -97,6 +97,18 @@ type Dialer struct {
 	// UpstreamDialer is a dialer that will override the default dialer for
 	// opening outgoing connections. The default is a net.Dial("udp", ...).
 	UpstreamDialer UpstreamDialer
+
+	// MaxMTU caps the largest MTU value used during the connection
+	// handshake. The default (0) keeps the existing behaviour: probes start
+	// at 1492 bytes and the negotiated MTU may go up to 1500.
+	//
+	// Set this to your local interface MTU when it is below 1500 (for
+	// example 1400 on hosts behind a tunnel or VPN). With the default,
+	// the kernel will fragment the first probes into two IP packets, and
+	// some firewalls drop fragmented UDP and never deliver them to the
+	// server. Capping the MTU keeps every packet inside a single IP
+	// datagram for the entire connection.
+	MaxMTU uint16
 }
 
 // Ping sends a ping to an address and returns the response obtained. If
@@ -221,7 +233,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 	}
 	dialer.ErrorLog = dialer.ErrorLog.With("src", "dialer", "raddr", conn.RemoteAddr().String())
 
-	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
+	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2), maxMTU: dialer.MaxMTU}
 	defer cs.ticker.Stop()
 	if err = cs.discoverMTU(ctx); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("discover mtu: %w", err))
@@ -286,6 +298,10 @@ type connState struct {
 	// 1 packet. It is the MTU size sent by the server.
 	mtu uint16
 
+	// maxMTU is copied from Dialer.MaxMTU and caps the probe sizes used
+	// during MTU discovery. Zero means use the defaults.
+	maxMTU uint16
+
 	serverSecurity bool
 	cookie         uint32
 
@@ -294,6 +310,26 @@ type connState struct {
 
 var mtuSizes = []uint16{1492, 1200, 576}
 
+// mtuSizesFor returns the MTU values to probe with when starting a
+// connection. If maxMTU is zero or already at least 1492, the unmodified
+// default list is returned. Otherwise the largest entry is replaced with
+// maxMTU and any default entries that are still smaller are kept after it.
+func mtuSizesFor(maxMTU uint16) []uint16 {
+	if maxMTU == 0 || maxMTU >= 1492 {
+		return mtuSizes
+	}
+	if maxMTU < 576 {
+		return []uint16{maxMTU}
+	}
+	out := []uint16{maxMTU}
+	for _, s := range mtuSizes {
+		if s < maxMTU {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // discoverMTU starts discovering an MTU size, the maximum packet size we
 // can send, by sending multiple open connection request 1 packets to the
 // server with a decreasing MTU size padding.
@@ -301,7 +337,7 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	go state.request1(ctx, mtuSizes)
+	go state.request1(ctx, mtuSizesFor(state.maxMTU))
 
 	b := make([]byte, 1492)
 	for {
