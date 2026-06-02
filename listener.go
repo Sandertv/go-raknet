@@ -318,7 +318,7 @@ func (s *security) blocked(addr net.Addr) bool {
 	}
 	if !time.Now().Before(expiresAt) {
 		delete(s.blocks, ip)
-		s.blockCount.Store(uint32(len(s.blocks)))
+		s.blockCount.Add(-1)
 		return false
 	}
 	
