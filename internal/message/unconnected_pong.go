@@ -13,13 +13,29 @@ type UnconnectedPong struct {
 }
 
 func (pk *UnconnectedPong) UnmarshalBinary(data []byte) error {
-	if len(data) < 34 || len(data) < 34+int(binary.BigEndian.Uint16(data[32:])) {
+	// need at least ping(8)+serverGUID(8)+magic(16) = 32 bytes
+	if len(data) < 32 {
 		return io.ErrUnexpectedEOF
 	}
 	pk.PingTime = int64(binary.BigEndian.Uint64(data))
 	pk.ServerGUID = int64(binary.BigEndian.Uint64(data[8:]))
-	// Magic: 16 bytes.
-	n := binary.BigEndian.Uint16(data[32:])
+
+	// if there are fewer than 34 bytes then length field is absent -> no Data
+	if len(data) < 34 {
+		pk.Data = nil
+		return nil
+	}
+
+	// read length and validate remaining bytes
+	n := int(binary.BigEndian.Uint16(data[32:34]))
+	if len(data) < 34+n {
+		return io.ErrUnexpectedEOF
+	}
+	if n == 0 {
+		pk.Data = nil
+		return nil
+	}
+
 	pk.Data = append([]byte(nil), data[34:34+n]...)
 	return nil
 }
