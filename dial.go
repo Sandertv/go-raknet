@@ -285,9 +285,12 @@ func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, erro
 // clientListen makes the RakNet connection passed listen as a client for
 // packets received in the connection passed.
 func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
-	// Create a buffer with the maximum size a UDP packet sent over RakNet is
-	// allowed to have. We can re-use this buffer for each packet.
-	b := make([]byte, rakConn.effectiveMTU())
+	// Create a buffer sized to the largest datagram a peer may send. This is
+	// independent of our own (possibly clamped-lower) send MTU: the dial
+	// handshake accepts server MTUs up to 1500, so a smaller buffer would let
+	// conn.Read silently truncate oversized datagrams, which then fail to parse
+	// (unexpected EOF) after already being ACKed. Matches listener.go.
+	b := make([]byte, 1500)
 	for {
 		n, err := conn.Read(b)
 		if err == nil && n != 0 {
