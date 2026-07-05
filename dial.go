@@ -287,7 +287,7 @@ func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, erro
 func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 	// Create a buffer with the maximum size a UDP packet sent over RakNet is
 	// allowed to have. We can re-use this buffer for each packet.
-	b := make([]byte, rakConn.effectiveMTU())
+	b := make([]byte, maxMTUSize)
 	for {
 		n, err := conn.Read(b)
 		if err == nil && n != 0 {
