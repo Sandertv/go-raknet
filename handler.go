@@ -133,6 +133,11 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 		}
 	}
 
+	// Vanilla clients always provide a negative ClientGUID.
+	if pk.ClientGUID >= 0 {
+		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '%d', expected negative", pk.ClientGUID)
+	}
+
 	mtuSize := min(pk.MTU, h.l.maxMTU())
 
 	data, _ := (&message.OpenConnectionReply2{ServerGUID: h.l.id, ClientAddress: resolve(addr), MTU: mtuSize}).MarshalBinary()
