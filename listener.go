@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,9 @@ var listenerID = rand.Int64()
 // Specific features of the listener may be modified once it is returned, such
 // as the used log and/or the accepted protocol.
 func (conf ListenConfig) Listen(address string) (*Listener, error) {
+	if os.Getenv("RAKNET_DISABLE_COOKIES") == "true" {
+		conf.DisableCookies = true
+	}
 	if conf.ErrorLog == nil {
 		conf.ErrorLog = slog.New(internal.DiscardHandler{})
 	}

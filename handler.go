@@ -126,14 +126,11 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read OPEN_CONNECTION_REQUEST_2: %w", err)
 	}
-	if expected := h.cookie(addr, h.cookieSalt.Load()); pk.Cookie != expected &&
-		pk.Cookie != h.cookie(addr, h.previousSalt.Load()) {
-		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid cookie '%x', expected '%x'", pk.Cookie, expected)
-	}
-
-	// Vanilla clients always provide a negative ClientGUID.
-	if pk.ClientGUID >= 0 {
-		return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '%d', expected negative", pk.ClientGUID)
+	if !h.l.conf.DisableCookies {
+		if expected := h.cookie(addr, h.cookieSalt.Load()); pk.Cookie != expected &&
+			pk.Cookie != h.cookie(addr, h.previousSalt.Load()) {
+			return fmt.Errorf("handle OPEN_CONNECTION_REQUEST_2: invalid cookie '%x', expected '%x'", pk.Cookie, expected)
+		}
 	}
 
 	mtuSize := min(pk.MTU, h.l.maxMTU())
