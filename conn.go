@@ -27,7 +27,7 @@ const (
 	maxMTUSize    = 1492
 	maxWindowSize = 2048
 
-	// Split reassembly limits bound peer-controlled allocations on every connection.
+	// Split reassembly limits bound memory use on every connection.
 	maxSplitCount       = 8192
 	maxConcurrentSplits = 256
 )
@@ -543,15 +543,13 @@ func resolve(addr net.Addr) netip.AddrPort {
 // packet of its sequence, it will continue handling the full packet as it
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
-	// Unconditional memory-safety ceiling on peer-controlled values, enforced
-	// on every connection. This bounds the make([][]byte, splitCount)
-	// allocation below.
+	// Reject invalid split counts before allocating the fragment slice.
 	if p.splitCount == 0 || p.splitCount > maxSplitCount {
 		return fmt.Errorf("split packet: split count %v is out of range (1 - %v)", p.splitCount, maxSplitCount)
 	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
-		conn.evictSplitRingCollision(p.splitID)
+		conn.evictConflictingSplit(p.splitID)
 		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
@@ -574,8 +572,9 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	return conn.receivePacket(p)
 }
 
-// evictSplitRingCollision evicts stale state that shares a split ID slot.
-func (conn *Conn) evictSplitRingCollision(splitID uint16) {
+// evictConflictingSplit removes an incomplete split packet that occupies the
+// same bounded reassembly slot as splitID.
+func (conn *Conn) evictConflictingSplit(splitID uint16) {
 	slot := splitID % maxConcurrentSplits
 	for id := range conn.splits {
 		if id%maxConcurrentSplits == slot {
