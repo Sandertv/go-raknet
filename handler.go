@@ -56,8 +56,7 @@ func (h listenerConnectionHandler) cookie(addr net.Addr, salt uint64) uint32 {
 		binary.LittleEndian.PutUint16(b[8:], uint16(udp.Port))
 		b = append(b, udp.IP...)
 	} else if addr != nil {
-		// Non-UDP address (custom listener): hash its string form so cookies
-		// stay deterministic per address instead of dereferencing a nil *UDPAddr.
+		// Hash custom address strings to keep cookies deterministic.
 		b = append(b, addr.String()...)
 	}
 	// CRC32 isn't cryptographically secure, but we don't really need that here.

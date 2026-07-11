@@ -302,10 +302,7 @@ func (s *security) tick(stop <-chan struct{}) {
 	}
 }
 
-// addrIPKey returns the 16-byte IP used as a block-map key for addr. It reports
-// false when addr is not a *net.UDPAddr or carries an IP that does not resolve
-// to a 16-byte form, so callers can treat such addresses as unblockable instead
-// of panicking.
+// addrIPKey returns addr's 16-byte IP address, if available.
 func addrIPKey(addr net.Addr) ([16]byte, bool) {
 	udp, ok := addr.(*net.UDPAddr)
 	if !ok || udp == nil {
@@ -330,8 +327,7 @@ func (s *security) blockFor(addr net.Addr, duration time.Duration) {
 	}
 	ip, ok := addrIPKey(addr)
 	if !ok {
-		// Addresses without a resolvable IP (non-UDP listeners, malformed IPs)
-		// are unblockable rather than a panic.
+		// Ignore addresses that cannot be blocked by IP.
 		return
 	}
 	s.mu.Lock()
