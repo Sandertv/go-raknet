@@ -426,12 +426,20 @@ func (state *connState) openConnection(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	updates := make(chan openConnectionRequest2)
-	go state.request2(ctx, openConnectionRequest2{
-		mtu:            state.mtu,
-		serverSecurity: state.serverSecurity,
-		cookie:         state.cookie,
-	}, updates)
+	startRequest2 := func(mtu uint16, serverSecurity bool, cookie uint32) (context.CancelFunc, <-chan struct{}) {
+		requestCtx, cancelRequest := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			state.request2(requestCtx, mtu, serverSecurity, cookie)
+		}()
+		return cancelRequest, done
+	}
+	cancelRequest2, request2Done := startRequest2(state.mtu, state.serverSecurity, state.cookie)
+	defer func() {
+		cancelRequest2()
+		<-request2Done
+	}()
 
 	b := make([]byte, maxMTUSize)
 	for {
@@ -459,15 +467,12 @@ func (state *connState) openConnection(ctx context.Context) error {
 				continue
 			}
 			state.mtu, state.serverSecurity, state.cookie = pk.MTU, pk.ServerHasSecurity, pk.Cookie
-			select {
-			case updates <- openConnectionRequest2{
-				mtu:            state.mtu,
-				serverSecurity: state.serverSecurity,
-				cookie:         state.cookie,
-			}:
-			case <-ctx.Done():
-				return ctx.Err()
+			cancelRequest2()
+			<-request2Done
+			if err := ctx.Err(); err != nil {
+				return err
 			}
+			cancelRequest2, request2Done = startRequest2(state.mtu, state.serverSecurity, state.cookie)
 		case message.IDOpenConnectionReply2:
 			pk := &message.OpenConnectionReply2{}
 			if err = pk.UnmarshalBinary(b[1:n]); err != nil {
@@ -479,21 +484,13 @@ func (state *connState) openConnection(ctx context.Context) error {
 	}
 }
 
-type openConnectionRequest2 struct {
-	mtu            uint16
-	serverSecurity bool
-	cookie         uint32
-}
-
 // request2 continuously sends a message.OpenConnectionRequest2 every 500ms.
-func (state *connState) request2(ctx context.Context, request openConnectionRequest2, updates <-chan openConnectionRequest2) {
+func (state *connState) request2(ctx context.Context, mtu uint16, serverSecurity bool, cookie uint32) {
 	state.ticker.Reset(time.Second / 2)
 	for {
-		state.openConnectionRequest2(request.mtu, request.serverSecurity, request.cookie)
+		state.openConnectionRequest2(mtu, serverSecurity, cookie)
 		select {
 		case <-state.ticker.C:
-			continue
-		case request = <-updates:
 			continue
 		case <-ctx.Done():
 			return
