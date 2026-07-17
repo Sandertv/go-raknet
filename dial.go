@@ -383,7 +383,7 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 				return fmt.Errorf("read open connection reply 1: %w", err)
 			}
 			state.serverSecurity, state.cookie = response.ServerHasSecurity, response.Cookie
-			if response.ServerGUID == 0 || response.MTU < 400 || response.MTU > 1500 {
+			if response.ServerGUID == 0 || response.MTU < minMTUSize || response.MTU > maxMTUSize {
 				// This is an awful hack we cooked up to deal with OVH 'DDoS'
 				// protection. For some reason they send a broken MTU size
 				// first. Sending a Request2 followed by a Request1 deals with
@@ -451,7 +451,7 @@ func (state *connState) openConnection(ctx context.Context) error {
 			if err = pk.UnmarshalBinary(b[1:n]); err != nil {
 				return fmt.Errorf("read open connection reply 1: %w", err)
 			}
-			if pk.ServerGUID == 0 || pk.MTU < 400 || pk.MTU > 1500 {
+			if pk.ServerGUID == 0 || pk.MTU < minMTUSize || pk.MTU > maxMTUSize {
 				continue
 			}
 			state.mtu, state.serverSecurity, state.cookie = pk.MTU, pk.ServerHasSecurity, pk.Cookie
