@@ -58,10 +58,8 @@ func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
 	// Only look back as far as a full window. A dialer can push
 	// win.highest far forward with a single datagram, which would otherwise
 	// make us scan millions of gaps.
-	low := int(win.lowest)
-	if limit := start - maxWindowSize; limit > low {
-		low = limit
-	}
+	low := max(int(win.lowest), start - maxWindowSize)
+	
 	for index := start; index >= low; index-- {
 		i := uint24(index)
 		t, ok := win.queue[i]
