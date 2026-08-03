@@ -54,7 +54,15 @@ func (win *datagramWindow) shift() (n int) {
 // is shifted after this call.
 func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
 	missing := false
-	for index := int(win.highest) - 1; index >= int(win.lowest); index-- {
+	start := int(win.highest) - 1
+	// Only look back as far as a full window. A dialer can push
+	// win.highest far forward with a single datagram, which would otherwise
+	// make us scan millions of gaps.
+	low := int(win.lowest)
+	if limit := start - maxWindowSize; limit > low {
+		low = limit
+	}
+	for index := start; index >= low; index-- {
 		i := uint24(index)
 		t, ok := win.queue[i]
 		if ok {

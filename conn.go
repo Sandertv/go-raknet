@@ -441,6 +441,13 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 	conn.ackSlice = append(conn.ackSlice, seq)
 	conn.ackMu.Unlock()
 
+	// A single datagram with a huge sequence number would make the missing
+	// scan below iterate over every gap up to that number, so we reject the
+	// datagram if the window grew too big.
+	if conn.win.size() > maxWindowSize {
+		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
+	}
+
 	if conn.win.shift() == 0 {
 		// Datagram window couldn't be shifted up, so we're still missing
 		// packets.
@@ -450,9 +457,6 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 				return fmt.Errorf("receive datagram: send NACK: %w", err)
 			}
 		}
-	}
-	if conn.win.size() > maxWindowSize && conn.handler.limitsEnabled() {
-		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
 	return conn.handleDatagram(b[3:])
 }
