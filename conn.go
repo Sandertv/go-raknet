@@ -444,7 +444,7 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 	// A single datagram with a huge sequence number would make the missing
 	// scan below iterate over every gap up to that number, so we reject the
 	// datagram if the window grew too big.
-	if conn.win.size() > maxWindowSize {
+	if conn.win.size() > maxWindowSize && conn.handler.limitsEnabled() {
 		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
 
