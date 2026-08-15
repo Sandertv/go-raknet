@@ -116,6 +116,10 @@ type Dialer struct {
 	// server. Capping the MTU keeps every packet inside a single IP
 	// datagram for the entire connection.
 	MaxMTU uint16
+	// InitialSendMTU, if non-zero, is the datagram size used for sending
+	// immediately after the handshake. The connection then probes upward
+	// toward the negotiated MTU. Zero means send at the negotiated MTU.
+	InitialSendMTU uint16
 }
 
 // Ping sends a ping to an address and returns the response obtained. If
@@ -264,7 +268,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 // dial finishes the RakNet connection sequence and returns a Conn if
 // successful.
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{l: dialer.ErrorLog})
+	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialer.InitialSendMTU, dialerConnectionHandler{l: dialer.ErrorLog})
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTime: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
