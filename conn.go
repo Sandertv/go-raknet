@@ -28,7 +28,9 @@ const (
 	maxWindowSize = 2048
 
 	// Split reassembly limits bound memory use on every connection.
-	maxSplitCount       = 8192
+	maxSplitCount = 8192
+	// maxConcurrentSplits bounds packets part way through reassembly, matching
+	// the client, which drops fragments that would start a further one.
 	maxConcurrentSplits = 256
 )
 
@@ -549,7 +551,12 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	}
 	m, ok := conn.splits[p.splitID]
 	if !ok {
-		conn.evictConflictingSplit(p.splitID)
+		if len(conn.splits) >= maxConcurrentSplits {
+			// Drop the fragment starting a new packet, never one already part
+			// reassembled: its fragments are acknowledged, so the sender will
+			// not send them again.
+			return nil
+		}
 		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
@@ -570,18 +577,6 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 
 	delete(conn.splits, p.splitID)
 	return conn.receivePacket(p)
-}
-
-// evictConflictingSplit removes an incomplete split packet that occupies the
-// same bounded reassembly slot as splitID.
-func (conn *Conn) evictConflictingSplit(splitID uint16) {
-	slot := splitID % maxConcurrentSplits
-	for id := range conn.splits {
-		if id%maxConcurrentSplits == slot {
-			delete(conn.splits, id)
-			return
-		}
-	}
 }
 
 // sendACK sends an acknowledgement packet containing the packet sequence
