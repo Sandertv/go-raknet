@@ -560,6 +560,11 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 		return fmt.Errorf("split packet: split count %v is out of range (1 - %v)", p.splitCount, maxSplitCount)
 	}
 	entry, ok := conn.splits[p.splitID]
+	if ok && int(p.splitCount) != len(entry.fragments) {
+		// The split count disagrees with the reassembly already under way for
+		// this ID, so the fragment belongs to neither. The client drops it.
+		return nil
+	}
 	if !ok {
 		if len(conn.splits) >= maxConcurrentSplits {
 			conn.evictExpiredSplits(time.Now())
