@@ -35,6 +35,9 @@ const (
 	// splitTimeout is how long a reassembly may go without a new fragment
 	// before its slot may be reclaimed. The client uses its connection timeout.
 	splitTimeout = time.Second * 10
+	// splitSweepInterval bounds how often arriving at the cap may sweep, so a
+	// peer cannot make every fragment it sends scan the whole reassembly map.
+	splitSweepInterval = time.Second
 )
 
 // splitEntry is a packet part way through reassembly. Fragments are positioned
@@ -86,6 +89,8 @@ type Conn struct {
 	// slices is equal to the split count, and packets are positioned in that
 	// slice indexed by the split index.
 	splits map[uint16]splitEntry
+	// lastSplitSweep is when splits was last swept for expired reassemblies.
+	lastSplitSweep time.Time
 
 	// win is an ordered queue used to track which datagrams were received and
 	// which datagrams were missing, so that we can send NACKs to request
@@ -568,8 +573,9 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 		return nil
 	}
 	if !ok {
-		if len(conn.splits) >= maxConcurrentSplits {
-			conn.evictExpiredSplits(time.Now())
+		if now := time.Now(); len(conn.splits) >= maxConcurrentSplits && now.Sub(conn.lastSplitSweep) >= splitSweepInterval {
+			conn.lastSplitSweep = now
+			conn.evictExpiredSplits(now)
 		}
 		if len(conn.splits) >= maxConcurrentSplits {
 			// Drop the fragment starting a new packet, never one already part
@@ -603,7 +609,8 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 
 // evictExpiredSplits frees reassemblies that have not advanced within
 // splitTimeout, so a peer cannot hold every slot for the rest of the session.
-// The client sweeps its own split list the same way on each update.
+// The client sweeps on every update; this runs only under slot pressure, which
+// reclaims the same slots at the point they are wanted.
 func (conn *Conn) evictExpiredSplits(now time.Time) {
 	for id, entry := range conn.splits {
 		if now.Sub(entry.lastUpdate) >= splitTimeout {
