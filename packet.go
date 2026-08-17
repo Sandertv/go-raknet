@@ -23,10 +23,8 @@ const (
 	bitFlagNeedsBAndAS = 0x04
 )
 
-// encapsulatedPacketSize returns the encoded size of one encapsulated packet:
-// the reliability header that varies with the reliability, the split header when
-// split, and the content. It excludes the 4-byte datagram header, so it is also
-// the number of bytes the packet counts against the congestion window.
+// encapsulatedPacketSize returns a packet's encoded size excluding the 4-byte
+// datagram header, which is also what it counts in flight.
 func encapsulatedPacketSize(contentLength int, reliability reliability, split bool) int {
 	size := 3 + contentLength
 	if reliability.reliable() {

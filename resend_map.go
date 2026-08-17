@@ -32,8 +32,8 @@ func newRecoveryQueue() *resendMap {
 	}
 }
 
-// add stores a packet under its datagram sequence number and schedules when to
-// retransmit it if no ACK arrives, one RTO from now.
+// add stores a packet by its sequence number and schedules the retransmit one
+// RTO out.
 func (m *resendMap) add(index uint24, pk *packet, inFlightBytes uint32) {
 	now := time.Now()
 	nextSend := now.Add(m.rto())
@@ -96,8 +96,7 @@ func (m *resendMap) observeRTT(sample time.Duration) {
 	m.deviationRTT += time.Duration(float64(difference-m.deviationRTT) * 0.05)
 }
 
-// rtt returns the smoothed round-trip estimate, or a default until the first
-// datagram has been acknowledged.
+// rtt returns the smoothed round-trip estimate, or a default before the first ACK.
 func (m *resendMap) rtt() time.Duration {
 	if !m.hasRTT {
 		return time.Millisecond * 50
