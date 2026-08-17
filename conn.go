@@ -38,9 +38,11 @@ const (
 )
 
 // splitEntry is a packet part way through reassembly. Fragments are positioned
-// by split index, and lastUpdate is when the most recent one arrived.
+// by split index, received counts how many have arrived, and lastUpdate is when
+// the most recent one did.
 type splitEntry struct {
 	fragments  [][]byte
+	received   uint32
 	lastUpdate time.Time
 }
 
@@ -584,10 +586,11 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 		return nil
 	}
 	entry.fragments[p.splitIndex] = p.content
+	entry.received++
 	entry.lastUpdate = time.Now()
 	conn.splits[p.splitID] = entry
 
-	if slices.ContainsFunc(entry.fragments, func(i []byte) bool { return i == nil }) {
+	if entry.received != uint32(len(entry.fragments)) {
 		// We haven't yet received all split fragments, so we cannot add the
 		// packets together yet.
 		return nil
