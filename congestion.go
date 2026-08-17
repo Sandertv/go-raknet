@@ -7,12 +7,18 @@ import "math"
 // through slow start and then congestion avoidance. A NAK begins recovery by
 // lowering the threshold; a timeout also resets the window to one MTU.
 type congestionWindow struct {
-	mtu        uint32
-	window     float64
-	threshold  float64
-	inFlight   uint32
-	nextBlock  uint24
-	backedOff  bool
+	mtu       uint32
+	window    float64
+	threshold float64
+	inFlight  uint32
+	// nextBlock is the sequence number that starts the next congestion block: a
+	// group of datagrams sent back to back, over which recovery happens at most
+	// once so a burst of losses is treated as one event.
+	nextBlock uint24
+	// backedOff is set once the window has been reduced for the current block.
+	backedOff bool
+	// continuous reports whether more datagrams were waiting last tick. The
+	// window only grows while the sender is actually pushing data.
 	continuous bool
 }
 
@@ -20,6 +26,8 @@ func newCongestionWindow(mtu uint16) congestionWindow {
 	return congestionWindow{mtu: uint32(mtu), window: float64(mtu)}
 }
 
+// transmissionBandwidth returns how many new reliable bytes may be sent now,
+// that is the room left in the window.
 func (c *congestionWindow) transmissionBandwidth() uint32 {
 	if float64(c.inFlight) >= c.window {
 		return 0
@@ -47,6 +55,10 @@ func (c *congestionWindow) acknowledged(bytes uint32) {
 	c.inFlight -= bytes
 }
 
+// ack grows the window for one acknowledged datagram: by a full MTU per ACK
+// during slow start, then by the Reno additive increase once past the
+// threshold. nextSequence is the next sequence number the sender will use, used
+// to scope recovery to one congestion block.
 func (c *congestionWindow) ack(sequence, nextSequence uint24) {
 	if !c.continuous {
 		return
@@ -69,6 +81,8 @@ func (c *congestionWindow) ack(sequence, nextSequence uint24) {
 	c.window += float64(c.mtu*c.mtu) / c.window
 }
 
+// nak reacts to a NAK: halve the threshold so the window stops growing, but
+// leave the window itself alone. At most once per congestion block.
 func (c *congestionWindow) nak(nextSequence uint24) {
 	if c.continuous && !c.backedOff {
 		c.threshold = c.window / 2
@@ -77,6 +91,9 @@ func (c *congestionWindow) nak(nextSequence uint24) {
 	}
 }
 
+// resend reacts to a retransmission timeout, the harder signal: halve the
+// threshold and drop the window back to one MTU. At most once per block, and
+// only once the window is large enough to be worth cutting.
 func (c *congestionWindow) resend(nextSequence uint24) {
 	if !c.continuous || c.backedOff || c.window <= float64(c.mtu*2) {
 		return
@@ -87,6 +104,8 @@ func (c *congestionWindow) resend(nextSequence uint24) {
 	c.backedOff = true
 }
 
+// sequenceGreaterThan reports whether a is ahead of b in 24-bit sequence space,
+// treating the nearer half of the ring as "ahead" so wraparound compares right.
 func sequenceGreaterThan(a, b uint24) bool {
 	const half = uint24(0x7fffff)
 	return a != b && (b-a)&0xffffff > half

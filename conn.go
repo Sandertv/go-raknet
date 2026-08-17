@@ -44,6 +44,9 @@ const (
 	resendBufferSize = 512
 )
 
+// queuedDatagram is one datagram waiting to be sent: the packet, its size on
+// the wire (for the send-queue byte cap) and the bytes it counts against the
+// congestion window.
 type queuedDatagram struct {
 	pk            *packet
 	wireSize      uint32
@@ -130,7 +133,13 @@ type Conn struct {
 	// sendQueueFreed is closed and replaced when the send queue frees space, so
 	// that every writer waiting on it wakes to re-check its own requirement.
 	sendQueueFreed chan struct{}
-	sendBudget     uint32
+	// sendBudget is the bytes still sendable this tick, refreshed from the
+	// congestion window at the start of each update.
+	sendBudget uint32
+	// continuousSend records whether data was still queued at the last update;
+	// the window only grows while data is actually flowing. wireContinuous is
+	// the same idea per datagram: the flag set on the wire, true for every
+	// datagram after the first in a tick.
 	continuousSend bool
 	wireContinuous bool
 	// sendSignal wakes the connection's own goroutine, which owns every send.
@@ -561,6 +570,10 @@ func (conn *Conn) sendUnreliable(pk encoding.BinaryMarshaler) error {
 	return conn.writeControl(b, reliabilityUnreliable)
 }
 
+// writeControl queues an internally generated packet (a ping, a disconnect)
+// onto the control queue, which drains ahead of application data. It fails
+// instead of blocking when the queue is full, so a control send never waits on
+// backpressure.
 func (conn *Conn) writeControl(b []byte, rel reliability) error {
 	required := conn.queuedSize(b, rel)
 	conn.mu.Lock()
@@ -887,6 +900,9 @@ func (conn *Conn) sendable(datagram queuedDatagram) bool {
 	return len(conn.retransmission.unacknowledged) < resendBufferSize
 }
 
+// drainSendQueue sends as many queued datagrams as the congestion window and
+// the resend buffer allow, control queue first. Only the connection's own send
+// goroutine calls it.
 func (conn *Conn) drainSendQueue() error {
 	// Wake blocked writers once for the whole drain rather than per datagram:
 	// they re-check the budget anyway, and each signal costs a channel.
@@ -927,6 +943,8 @@ func (conn *Conn) drainSendQueue() error {
 	return nil
 }
 
+// consumeSendBudget subtracts a sent datagram's bytes from this tick's budget,
+// stopping at zero.
 func (conn *Conn) consumeSendBudget(size uint32) {
 	if size >= conn.sendBudget {
 		conn.sendBudget = 0
@@ -952,6 +970,11 @@ func (conn *Conn) signalSend() {
 	}
 }
 
+// sendDatagram assigns the next sequence number to pk and writes it to the
+// socket. A reliable packet is recorded for retransmission; its size is counted
+// in flight unless retransmit is set, meaning the bytes were already counted on
+// the first send. On a write error the packet is dropped and its accounting
+// undone.
 func (conn *Conn) sendDatagram(pk *packet, size uint32, retransmit bool) error {
 	header := byte(bitFlagDatagram)
 	if conn.congestion.slowStart() {
