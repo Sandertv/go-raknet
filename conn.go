@@ -604,11 +604,9 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 		return fmt.Errorf("read datagram: %w", io.ErrUnexpectedEOF)
 	}
 	seq := loadUint24(b)
-	if !conn.win.add(seq) {
-		// Datagram was already received, this might happen if a packet took a
-		// long time to arrive, and we already sent a NACK for it. This is
-		// expected to happen sometimes under normal circumstances, so no reason
-		// to return an error.
+	ok, skipped := conn.win.add(seq)
+	if !ok {
+		// A duplicate of a datagram still in the window. Not an error.
 		return nil
 	}
 	conn.ackMu.Lock()
@@ -626,16 +624,14 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 	conn.ackMu.Unlock()
 	conn.signalSend()
 
-	if conn.win.shift() == 0 {
-		// Datagram window couldn't be shifted up, so we're still missing
-		// packets.
-		rtt := time.Duration(conn.rtt.Load())
-		if missing := conn.win.missing(rtt + rtt/2); len(missing) > 0 {
-			if err := conn.sendNACK(missing); err != nil {
-				return fmt.Errorf("receive datagram: send NACK: %w", err)
-			}
+	if len(skipped) > 0 {
+		// NACK the gap immediately, as the client does: a delayed report loses the
+		// race against the sender's RTO, which cuts the window for a recoverable loss.
+		if err := conn.sendNACK(skipped); err != nil {
+			return fmt.Errorf("receive datagram: send NACK: %w", err)
 		}
 	}
+	conn.win.shift()
 	if conn.win.size() > maxWindowSize && conn.handler.limitsEnabled() {
 		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
