@@ -63,10 +63,14 @@ type Conn struct {
 	seq, orderIndex, messageIndex uint24
 	splitID                       uint32
 
-	// mtu is the MTU size of the connection. Packets longer than this size
-	// must be split into fragments for them to arrive at the client without
-	// losing bytes.
+	// mtu is the handshake-negotiated MTU. It is the maximum we will ever
+	// send; vanilla clients lock to this value for the session.
 	mtu uint16
+	// sendMTU is the current send cap. It starts at InitialSendMTU (if set)
+	// and is raised when a probe of that size is ACKed.
+	sendMTU   atomic.Uint32
+	discover  sendMTUDiscovery
+	onSendMTU func(addr net.Addr, sendMTU uint16)
 
 	// splits is a map of slices indexed by split IDs. The length of each of the
 	// slices is equal to the split count, and packets are positioned in that
@@ -100,8 +104,12 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address
 // passed.
-func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler) *Conn {
+func newConn(conn net.PacketConn, raddr net.Addr, mtu, initialSend uint16, h connectionHandler) *Conn {
 	mtu = clampMTU(mtu, minMTUSize)
+	send := mtu
+	if initialSend != 0 {
+		send = min(clampMTU(initialSend, minMTUSize), mtu)
+	}
 	c := &Conn{
 		raddr:          raddr,
 		conn:           conn,
@@ -118,6 +126,10 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 128)),
 		nackBuf:        bytes.NewBuffer(make([]byte, 0, 64)),
 	}
+	c.sendMTU.Store(uint32(send))
+	if initialSend == 0 || send >= mtu {
+		c.discover.done = true
+	}
 	c.ctx, c.cancelFunc = context.WithCancel(context.Background())
 	t := time.Now()
 	c.lastActivity.Store(&t)
@@ -133,10 +145,16 @@ func clampMTU(mtu, minMTU uint16) uint16 {
 	return max(mtu, minMTU)
 }
 
-// effectiveMTU returns the mtu size without the space allocated for IP and
-// UDP headers (28 bytes).
+// effectiveMTU returns the current send MTU without the space allocated for
+// IP and UDP headers (28 bytes).
 func (conn *Conn) effectiveMTU() uint16 {
-	return conn.mtu - 28
+	return uint16(conn.sendMTU.Load()) - 28
+}
+
+// MTU returns the current send MTU. After handshake this may be below the
+// negotiated maximum until send-path probes are ACKed.
+func (conn *Conn) MTU() uint16 {
+	return uint16(conn.sendMTU.Load())
 }
 
 // startTicking makes the connection start ticking, sending ACKs and pings to
@@ -158,6 +176,9 @@ func (conn *Conn) startTicking() {
 			if i%3 == 0 {
 				conn.checkResend(t)
 			}
+			conn.mu.Lock()
+			conn.maybeProbeSendMTU(t)
+			conn.mu.Unlock()
 			if unix := conn.closing.Load(); unix != 0 {
 				before := acksLeft
 				conn.mu.Lock()
@@ -220,6 +241,9 @@ func (conn *Conn) checkResend(now time.Time) {
 	conn.rtt.Store(int64(rtt))
 
 	for seq, t := range conn.retransmission.unacknowledged {
+		if conn.discover.isPending(seq) {
+			continue
+		}
 		// These packets have not been acknowledged for too long: We resend them
 		// by ourselves, even though no NACK has been issued yet.
 		if now.Sub(t.timestamp) > delay {
@@ -294,7 +318,7 @@ func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
 			pk.splitIndex = uint32(splitIndex)
 			pk.splitID = splitID
 		}
-		if err = conn.sendDatagram(pk); err != nil {
+		if _, err = conn.sendDatagram(pk); err != nil {
 			return 0, err
 		}
 		n += len(content)
@@ -623,6 +647,7 @@ func (conn *Conn) handleACK(b []byte) error {
 	for _, sequenceNumber := range ack.packets {
 		// Take out all stored packets from the recovery queue.
 		if p, ok := conn.retransmission.acknowledge(sequenceNumber); ok {
+			conn.onProbeAck(sequenceNumber)
 			// Clear the packet and return it to the pool so that it may be
 			// re-used.
 			p.content = p.content[:0]
@@ -649,11 +674,14 @@ func (conn *Conn) handleNACK(b []byte) error {
 // numbers passed.
 func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 	for _, sequenceNumber := range sequenceNumbers {
+		if conn.discover.isPending(sequenceNumber) {
+			continue
+		}
 		pk, ok := conn.retransmission.retransmit(sequenceNumber)
 		if !ok {
 			continue
 		}
-		if err = conn.sendDatagram(pk); err != nil {
+		if _, err = conn.sendDatagram(pk); err != nil {
 			return err
 		}
 	}
@@ -662,7 +690,7 @@ func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
 
 // sendDatagram sends a datagram over the connection that includes the packet
 // passed. It is assigned a new sequence number and added to the retransmission.
-func (conn *Conn) sendDatagram(pk *packet) error {
+func (conn *Conn) sendDatagram(pk *packet) (uint24, error) {
 	conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
 	seq := conn.seq.Inc()
 	writeUint24(conn.buf, seq)
@@ -676,9 +704,9 @@ func (conn *Conn) sendDatagram(pk *packet) error {
 	}
 
 	if err := conn.writeTo(conn.buf.Bytes(), conn.raddr); err != nil {
-		return fmt.Errorf("send datagram: %w", err)
+		return seq, fmt.Errorf("send datagram: %w", err)
 	}
-	return nil
+	return seq, nil
 }
 
 // writeTo calls WriteTo on the underlying UDP connection and returns an error

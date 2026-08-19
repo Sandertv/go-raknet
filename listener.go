@@ -39,6 +39,23 @@ type ListenConfig struct {
 	// MaxMTU caps the largest MTU negotiated with incoming clients. If zero,
 	// the maximum supported MTU is used.
 	MaxMTU uint16
+	// InitialSendMTU, if non-zero, is the datagram size used for sending
+	// immediately after the handshake. The connection then probes upward
+	// toward the negotiated MTU. Zero means send at the negotiated MTU
+	// (historical behaviour).
+	//
+	// Use this so low-MTU paths (WARP, T-Mobile, hotspots) can finish a
+	// 1492-byte handshake but only receive packets that fit until a probe
+	// of that size is ACKed. Vanilla clients do not raise their own send
+	// MTU after the handshake — this is send-path discovery only.
+	InitialSendMTU uint16
+	// InitialSendMTUFunc, if set, overrides InitialSendMTU per remote
+	// address when the connection is created. Return 0 to fall back to
+	// InitialSendMTU. Called on the handshake goroutine — keep it fast.
+	InitialSendMTUFunc func(addr net.Addr) uint16
+	// OnSendMTU, if set, is called when the send MTU is first set and
+	// whenever a probe raises it. Must not call back into Conn.
+	OnSendMTU func(addr net.Addr, sendMTU uint16)
 	// BlockDuration specifies how long IP addresses should be blocked if an
 	// error is encountered during the handling of packets from an address.
 	// BlockDuration defaults to 10s. If set to a negative value, IP addresses
@@ -206,6 +223,15 @@ func (listener *Listener) maxMTU() uint16 {
 	return clampMTU(listener.conf.MaxMTU, minMTUSize)
 }
 
+func (listener *Listener) initialSendMTU(addr net.Addr) uint16 {
+	if f := listener.conf.InitialSendMTUFunc; f != nil {
+		if v := f(addr); v != 0 {
+			return v
+		}
+	}
+	return listener.conf.InitialSendMTU
+}
+
 // listen continuously reads from the listener's UDP connection, until closed
 // has a value in it.
 func (listener *Listener) listen() {
@@ -316,7 +342,7 @@ func (s *security) blockFor(addr net.Addr, duration time.Duration) {
 	defer s.mu.Unlock()
 
 	ip := [16]byte(addr.(*net.UDPAddr).IP.To16())
-	
+
 	if _, ok := s.blocks[ip]; !ok {
 		s.blockCount.Add(1)
 	}
@@ -345,7 +371,7 @@ func (s *security) blocked(addr net.Addr) bool {
 		s.blockCount.Store(uint32(len(s.blocks)))
 		return false
 	}
-	
+
 	return true
 }
 

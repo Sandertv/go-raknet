@@ -144,7 +144,9 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 	}
 
 	go func() {
-		conn := newConn(h.l.conn, addr, mtuSize, h)
+		conn := newConn(h.l.conn, addr, mtuSize, h.l.initialSendMTU(addr), h)
+		conn.onSendMTU = h.l.conf.OnSendMTU
+		conn.notifySendMTU()
 		h.l.connections.Store(resolve(addr), conn)
 
 		t := time.NewTimer(time.Second * 10)
