@@ -302,6 +302,19 @@ func (s *security) tick(stop <-chan struct{}) {
 	}
 }
 
+// addrIPKey returns addr's 16-byte IP address, if available.
+func addrIPKey(addr net.Addr) ([16]byte, bool) {
+	udp, ok := addr.(*net.UDPAddr)
+	if !ok || udp == nil {
+		return [16]byte{}, false
+	}
+	ip := udp.IP.To16()
+	if ip == nil {
+		return [16]byte{}, false
+	}
+	return [16]byte(ip), true
+}
+
 // block stops the handling of packets originating from the IP of a net.Addr for the duration provided by the ListenConfig.
 func (s *security) block(addr net.Addr) {
 	s.blockFor(addr, s.conf.BlockDuration)
@@ -312,11 +325,14 @@ func (s *security) blockFor(addr net.Addr, duration time.Duration) {
 	if duration <= 0 {
 		return
 	}
+	ip, ok := addrIPKey(addr)
+	if !ok {
+		// Ignore addresses that cannot be blocked by IP.
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	ip := [16]byte(addr.(*net.UDPAddr).IP.To16())
-	
 	if _, ok := s.blocks[ip]; !ok {
 		s.blockCount.Add(1)
 	}
@@ -331,10 +347,12 @@ func (s *security) blocked(addr net.Addr) bool {
 		// Fast path optimisation: Prevents (relatively costly) map lookups.
 		return false
 	}
+	ip, ok := addrIPKey(addr)
+	if !ok {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	ip := [16]byte(addr.(*net.UDPAddr).IP.To16())
 
 	expiresAt, blocked := s.blocks[ip]
 	if !blocked {
@@ -345,7 +363,7 @@ func (s *security) blocked(addr net.Addr) bool {
 		s.blockCount.Store(uint32(len(s.blocks)))
 		return false
 	}
-	
+
 	return true
 }
 
