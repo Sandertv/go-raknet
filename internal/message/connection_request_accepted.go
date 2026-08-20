@@ -22,6 +22,9 @@ func (pk *ConnectionRequestAccepted) UnmarshalBinary(data []byte) error {
 	}
 	var offset int
 	pk.ClientAddress, offset = addr(data)
+	if len(data)-offset < 2 {
+		return io.ErrUnexpectedEOF
+	}
 	pk.SystemIndex = binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	for i := range 20 {

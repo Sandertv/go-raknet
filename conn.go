@@ -26,7 +26,28 @@ const (
 	minMTUSize    = 400
 	maxMTUSize    = 1492
 	maxWindowSize = 2048
+
+	// Split reassembly limits bound memory use on every connection.
+	maxSplitCount = 8192
+	// maxConcurrentSplits bounds packets part way through reassembly, matching
+	// the client, which drops fragments that would start a further one.
+	maxConcurrentSplits = 256
+	// splitTimeout is how long a reassembly may go without a new fragment
+	// before its slot may be reclaimed. The client uses its connection timeout.
+	splitTimeout = time.Second * 10
+	// splitSweepInterval bounds how often arriving at the cap may sweep, so a
+	// peer cannot make every fragment it sends scan the whole reassembly map.
+	splitSweepInterval = time.Second
 )
+
+// splitEntry is a packet part way through reassembly. Fragments are positioned
+// by split index, received counts how many have arrived, and lastUpdate is when
+// the most recent one did.
+type splitEntry struct {
+	fragments  [][]byte
+	received   uint32
+	lastUpdate time.Time
+}
 
 // Conn represents a connection to a specific client. It is not a real
 // connection, as UDP is connectionless, but rather a connection emulated using
@@ -71,7 +92,9 @@ type Conn struct {
 	// splits is a map of slices indexed by split IDs. The length of each of the
 	// slices is equal to the split count, and packets are positioned in that
 	// slice indexed by the split index.
-	splits map[uint16][][]byte
+	splits map[uint16]splitEntry
+	// lastSplitSweep is when splits was last swept for expired reassemblies.
+	lastSplitSweep time.Time
 
 	// win is an ordered queue used to track which datagrams were received and
 	// which datagrams were missing, so that we can send NACKs to request
@@ -110,7 +133,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		pk:             new(packet),
 		connected:      make(chan struct{}),
 		packets:        internal.Chan[[]byte](4, 4096),
-		splits:         make(map[uint16][][]byte),
+		splits:         make(map[uint16]splitEntry),
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
 		retransmission: newRecoveryQueue(),
@@ -543,36 +566,61 @@ func resolve(addr net.Addr) netip.AddrPort {
 // packet of its sequence, it will continue handling the full packet as it
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
-	const maxSplitCount = 512
-	const maxConcurrentSplits = 16
-
-	if p.splitCount > maxSplitCount && conn.handler.limitsEnabled() {
-		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
+	// Reject invalid split counts before allocating the fragment slice.
+	if p.splitCount == 0 || p.splitCount > maxSplitCount {
+		return fmt.Errorf("split packet: split count %v is out of range (1 - %v)", p.splitCount, maxSplitCount)
 	}
-	if len(conn.splits) > maxConcurrentSplits && conn.handler.limitsEnabled() {
-		return fmt.Errorf("split packet: maximum concurrent splits %v reached", maxConcurrentSplits)
+	entry, ok := conn.splits[p.splitID]
+	if ok && int(p.splitCount) != len(entry.fragments) {
+		// The split count disagrees with the reassembly already under way for
+		// this ID, so the fragment belongs to neither. The client drops it.
+		return nil
 	}
-	m, ok := conn.splits[p.splitID]
 	if !ok {
-		m = make([][]byte, p.splitCount)
-		conn.splits[p.splitID] = m
+		if now := time.Now(); len(conn.splits) >= maxConcurrentSplits && now.Sub(conn.lastSplitSweep) >= splitSweepInterval {
+			conn.lastSplitSweep = now
+			conn.evictExpiredSplits(now)
+		}
+		if len(conn.splits) >= maxConcurrentSplits {
+			// Drop the fragment starting a new packet, never one already part
+			// reassembled: its fragments are acknowledged, so the sender will
+			// not send them again.
+			return nil
+		}
+		entry.fragments = make([][]byte, p.splitCount)
 	}
-	if p.splitIndex > uint32(len(m)-1) {
-		// The split index was either negative or was bigger than the slice
-		// size, meaning the packet is invalid.
-		return fmt.Errorf("split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(m)-1)
+	if p.splitIndex > uint32(len(entry.fragments)-1) {
+		return fmt.Errorf("split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(entry.fragments)-1)
 	}
-	m[p.splitIndex] = p.content
+	if entry.fragments[p.splitIndex] != nil {
+		return nil
+	}
+	entry.fragments[p.splitIndex] = p.content
+	entry.received++
+	entry.lastUpdate = time.Now()
+	conn.splits[p.splitID] = entry
 
-	if slices.ContainsFunc(m, func(i []byte) bool { return len(i) == 0 }) {
+	if entry.received != uint32(len(entry.fragments)) {
 		// We haven't yet received all split fragments, so we cannot add the
 		// packets together yet.
 		return nil
 	}
-	p.content = slices.Concat(m...)
+	p.content = slices.Concat(entry.fragments...)
 
 	delete(conn.splits, p.splitID)
 	return conn.receivePacket(p)
+}
+
+// evictExpiredSplits frees reassemblies that have not advanced within
+// splitTimeout, so a peer cannot hold every slot for the rest of the session.
+// The client sweeps on every update; this runs only under slot pressure, which
+// reclaims the same slots at the point they are wanted.
+func (conn *Conn) evictExpiredSplits(now time.Time) {
+	for id, entry := range conn.splits {
+		if now.Sub(entry.lastUpdate) >= splitTimeout {
+			delete(conn.splits, id)
+		}
+	}
 }
 
 // sendACK sends an acknowledgement packet containing the packet sequence
