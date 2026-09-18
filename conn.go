@@ -546,6 +546,9 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	const maxSplitCount = 512
 	const maxConcurrentSplits = 16
 
+	if p.splitCount == 0 {
+		return fmt.Errorf("split packet: split count cannot be 0")
+	}
 	if p.splitCount > maxSplitCount && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
 	}
