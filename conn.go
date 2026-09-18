@@ -560,10 +560,9 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
 	}
-	if p.splitIndex > uint32(len(m)-1) {
-		// The split index was either negative or was bigger than the slice
-		// size, meaning the packet is invalid.
-		return fmt.Errorf("split packet: split index %v is out of range (0 - %v)", p.splitIndex, len(m)-1)
+	if p.splitIndex >= uint32(len(m)) {
+		// The split index is outside the slice, meaning the packet is invalid.
+		return fmt.Errorf("split packet: split index %v is out of range (split count: %v)", p.splitIndex, len(m))
 	}
 	m[p.splitIndex] = p.content
 
