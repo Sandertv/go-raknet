@@ -2,7 +2,6 @@ name: Go
 
 on:
   push:
-    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -29,11 +28,28 @@ jobs:
         with:
           go-version: stable
 
-      - name: Lint
-        run: make lint
-
       - name: Test
         run: go test -race ./...
 
       - name: Build
         run: go build ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2

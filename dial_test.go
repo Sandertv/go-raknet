@@ -2,44 +2,35 @@ package raknet_test
 
 import (
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/sandertv/go-raknet"
 )
 
 func TestPing(t *testing.T) {
-	//noinspection SpellCheckingInspection
-	const (
-		addr   = "mco.mineplex.com:19132"
-		prefix = "MCPE"
-	)
+	l := testListener(t)
+	const pong = "MCPE;Local test server"
+	l.PongData([]byte(pong))
+	addr := l.Addr().String()
 
 	data, err := raknet.Ping(addr)
 	if err != nil {
 		t.Fatalf("error pinging %v: %v", addr, err)
 	}
-	str := string(data)
-	if !strings.HasPrefix(str, prefix) {
-		t.Fatalf("ping data should have prefix %v, but got %v", prefix, str)
+	if string(data) != pong {
+		t.Fatalf("ping data should be %q, but got %q", pong, data)
 	}
 }
 
 func TestPingWithCustomDialer(t *testing.T) {
-	//noinspection SpellCheckingInspection
-	const (
-		addr   = "mco.mineplex.com:19132"
-		prefix = "MCPE"
-	)
-
-	localDialAddr, err := net.ResolveUDPAddr("udp", "0.0.0.0:55556")
-	if err != nil {
-		t.Fatalf("error resolving local dial address: %v", err)
-	}
+	l := testListener(t)
+	const pong = "MCPE;Local test server"
+	l.PongData([]byte(pong))
+	addr := l.Addr().String()
 
 	dialer := raknet.Dialer{
 		UpstreamDialer: &net.Dialer{
-			LocalAddr: localDialAddr,
+			LocalAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)},
 		},
 	}
 
@@ -47,17 +38,14 @@ func TestPingWithCustomDialer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error pinging %v: %v", addr, err)
 	}
-	str := string(data)
-	if !strings.HasPrefix(str, prefix) {
-		t.Fatalf("ping data should have prefix %v, but got %v", prefix, str)
+	if string(data) != pong {
+		t.Fatalf("ping data should be %q, but got %q", pong, data)
 	}
 }
 
 func TestDial(t *testing.T) {
-	//noinspection SpellCheckingInspection
-	const (
-		addr = "mco.mineplex.com:19132"
-	)
+	l := testListener(t)
+	addr := l.Addr().String()
 
 	conn, err := raknet.Dial(addr)
 	if err != nil {
@@ -66,22 +54,16 @@ func TestDial(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatalf("error closing connection: %v", err)
 	}
+	acceptTestConnection(t, l)
 }
 
 func TestDialWithCustomDialer(t *testing.T) {
-	//noinspection SpellCheckingInspection
-	const (
-		addr = "mco.mineplex.com:19132"
-	)
-
-	localDialAddr, err := net.ResolveUDPAddr("udp", "0.0.0.0:55555")
-	if err != nil {
-		t.Fatalf("error resolving local dial address: %v", err)
-	}
+	l := testListener(t)
+	addr := l.Addr().String()
 
 	dialer := raknet.Dialer{
 		UpstreamDialer: &net.Dialer{
-			LocalAddr: localDialAddr,
+			LocalAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)},
 		},
 	}
 	conn, err := dialer.Dial(addr)
@@ -91,4 +73,5 @@ func TestDialWithCustomDialer(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatalf("error closing connection: %v", err)
 	}
+	acceptTestConnection(t, l)
 }

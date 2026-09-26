@@ -62,5 +62,11 @@ func main() {
 ### Documentation
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/sandertv/go-raknet)](https://pkg.go.dev/github.com/sandertv/go-raknet)
 
+## Development
+
+Install the golangci-lint version specified in [the Go workflow](.github/workflows/go.yml),
+then run `golangci-lint run ./...` to check formatting and code quality.
+Run `go test -race ./...` and `go build ./...` to run the same test and build checks as CI.
+
 ## Contact
 [![Discord Banner 2](https://discordapp.com/api/guilds/623638955262345216/widget.png?style=banner2)](https://discord.gg/U4kFWHhTNR)

@@ -1,36 +1,55 @@
 package raknet_test
 
 import (
-	"fmt"
-	"github.com/sandertv/go-raknet"
 	"testing"
 	"time"
+
+	"github.com/sandertv/go-raknet"
 )
 
 func TestListen(t *testing.T) {
-	l, err := raknet.Listen(":19132")
+	l := testListener(t)
+	conn, err := raknet.Dial(l.Addr().String())
 	if err != nil {
-		panic(err)
+		t.Fatalf("error connecting to listener: %v", err)
 	}
+	defer conn.Close()
+	acceptTestConnection(t, l)
+}
+
+// testListener starts a local listener on an available port and closes it after the test.
+func testListener(t *testing.T) *raknet.Listener {
+	t.Helper()
+	l, err := raknet.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("error starting listener: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("error closing listener: %v", err)
+		}
+	})
+	return l
+}
+
+// acceptTestConnection accepts and closes one connection within a bounded wait.
+func acceptTestConnection(t *testing.T, l *raknet.Listener) {
+	t.Helper()
+	c := make(chan error, 1)
 	go func() {
-		_, _ = raknet.Dial("127.0.0.1:19132")
+		conn, err := l.Accept()
+		if err == nil {
+			err = conn.Close()
+		}
+		c <- err
 	}()
-	c := make(chan error)
-	go accept(l, c)
 
 	select {
 	case err := <-c:
 		if err != nil {
-			t.Error(err)
+			t.Fatalf("error accepting or closing connection: %v", err)
 		}
 	case <-time.After(time.Second * 3):
-		t.Errorf("accepting connection took longer than 3 seconds")
+		t.Fatal("accepting connection took longer than 3 seconds")
 	}
-}
-
-func accept(l *raknet.Listener, c chan error) {
-	if _, err := l.Accept(); err != nil {
-		c <- fmt.Errorf("error accepting connection: %v", err)
-	}
-	c <- nil
 }
