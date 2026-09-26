@@ -58,6 +58,10 @@ type Conn struct {
 	// connection. The rtt is measured in nanoseconds.
 	rtt atomic.Int64
 
+	// systemStart is the timestamp indicating when the remote system was started,
+	// collected via timestamps.
+	systemStart time.Time
+
 	closing atomic.Int64
 
 	ctx        context.Context
@@ -740,6 +744,11 @@ func (conn *Conn) writeTo(p []byte, raddr net.Addr) error {
 		conn.handler.log().Error("write to: "+err.Error(), "raddr", raddr.String())
 	}
 	return nil
+}
+
+// SystemUptime returns the uptime of the senders system or client.
+func (conn *Conn) SystemUptime() time.Duration {
+	return time.Since(conn.systemStart)
 }
 
 // startTime is the time the system or client was started.
