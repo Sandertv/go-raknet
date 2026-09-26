@@ -50,11 +50,15 @@ func (h listenerConnectionHandler) cookie(addr net.Addr, salt uint64) uint32 {
 	if h.l.conf.DisableCookies {
 		return 0
 	}
-	udp, _ := addr.(*net.UDPAddr)
 	b := make([]byte, 10, 26)
 	binary.LittleEndian.PutUint64(b, salt)
-	binary.LittleEndian.PutUint16(b[8:], uint16(udp.Port))
-	b = append(b, udp.IP...)
+	if udp, ok := addr.(*net.UDPAddr); ok && udp != nil {
+		binary.LittleEndian.PutUint16(b[8:], uint16(udp.Port))
+		b = append(b, udp.IP...)
+	} else if addr != nil {
+		// Hash custom address strings to keep cookies deterministic.
+		b = append(b, addr.String()...)
+	}
 	// CRC32 isn't cryptographically secure, but we don't really need that here.
 	// A new salt is calculated every time a Listener is created and we don't
 	// have any data that needs to protected. We just need a fast hash.
