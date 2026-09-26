@@ -20,7 +20,7 @@ type wrappedConn struct {
 // WriteTo wraps around net.PacketConn to replace functionality of WriteTo with
 // Write. It is used to be able to re-use the functionality in raknet.Conn.
 func (conn *wrappedConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
-	return conn.Conn.Write(b)
+	return conn.Write(b)
 }
 
 func (conn *wrappedConn) ReadFrom([]byte) (int, net.Addr, error) { panic("unused") }

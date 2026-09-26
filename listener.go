@@ -316,7 +316,7 @@ func (s *security) blockFor(addr net.Addr, duration time.Duration) {
 	defer s.mu.Unlock()
 
 	ip := [16]byte(addr.(*net.UDPAddr).IP.To16())
-	
+
 	if _, ok := s.blocks[ip]; !ok {
 		s.blockCount.Add(1)
 	}
@@ -345,7 +345,7 @@ func (s *security) blocked(addr net.Addr) bool {
 		s.blockCount.Store(uint32(len(s.blocks)))
 		return false
 	}
-	
+
 	return true
 }
 

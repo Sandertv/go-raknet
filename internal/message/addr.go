@@ -31,16 +31,17 @@ const (
 
 func putAddr(b []byte, addrPort netip.AddrPort) int {
 	addr, port := addrPort.Addr(), addrPort.Port()
-	if !addr.Is4() && !addr.Is6() {
+	switch {
+	case !addr.Is4() && !addr.Is6():
 		// Special case for zero addresses.
 		b[0], b[1], b[2], b[3], b[4] = 4, 255, 255, 255, 255
 		return sizeofAddr4
-	} else if addr.Is4() {
+	case addr.Is4():
 		ip4 := addr.As4()
 		b[0], b[1], b[2], b[3], b[4] = 4, ^ip4[0], ^ip4[1], ^ip4[2], ^ip4[3]
 		binary.BigEndian.PutUint16(b[5:], port)
 		return sizeofAddr4
-	} else {
+	default:
 		ip16 := addr.As16()
 		b[0] = 6
 		binary.LittleEndian.PutUint16(b[1:], uint16(23)) // syscall.AF_INET6 on Windows.
