@@ -297,6 +297,10 @@ func (dialer Dialer) clientListen(rakConn *Conn, conn net.Conn) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			if errors.Is(err, errSplitBudget) {
+				rakConn.closeImmediately()
+				return
+			}
 			// Errors reading a packet other than the connection being
 			// closed may be worth logging.
 			dialer.ErrorLog.Error("handle packet: " + err.Error())
