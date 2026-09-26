@@ -2,11 +2,18 @@ package raknet_test
 
 import (
 	"fmt"
+
 	"github.com/sandertv/go-raknet"
 )
 
 func ExamplePing() {
-	const address = "mco.mineplex.com:19132"
+	l, err := raknet.Listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	defer l.Close()
+	l.PongData([]byte("MCPE"))
+	address := l.Addr().String()
 
 	// Ping the target address. This will ping with a timeout of 5 seconds. raknet.PingContext and
 	// raknet.PingTimeout may be used to cancel at any other time.
@@ -14,14 +21,12 @@ func ExamplePing() {
 	if err != nil {
 		panic("error pinging " + address + ": " + err.Error())
 	}
-	str := string(data)
-
-	fmt.Println(str[:4])
+	fmt.Println(string(data))
 	// Output: MCPE
 }
 
 func ExampleDial() {
-	const address = "mco.mineplex.com:19132"
+	const address = "play.inpvp.net:19132"
 
 	// Dial a connection to the target address. This will time out after up to 10 seconds. raknet.DialTimeout
 	// and raknet.DialContext may be used to cancel at any other time.

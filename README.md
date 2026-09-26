@@ -50,7 +50,7 @@ import (
 )
 
 func main() {
-    conn, _ := raknet.Dial("mco.mineplex.com:19132")
+    conn, _ := raknet.Dial("play.inpvp.net:19132")
     defer conn.Close()
     
     b := make([]byte, 1024*1024*4)

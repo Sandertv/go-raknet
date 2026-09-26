@@ -1,0 +1,17 @@
+version: "2"
+
+linters:
+  default: none
+  enable: [govet, staticcheck, unused, ineffassign, gocritic]
+  settings:
+    gocritic:
+      disabled-checks: [appendAssign, ifElseChain]
+    staticcheck:
+      checks: [all, -ST1000, -ST1003, -ST1016]
+      dot-import-whitelist: []
+
+formatters:
+  enable: [gofmt]
+  settings:
+    gofmt:
+      simplify: false
