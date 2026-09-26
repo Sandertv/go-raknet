@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,11 +26,16 @@ const (
 	maxMTUSize    = 1492
 	maxWindowSize = 2048
 
-	// Split reassembly limits bound memory use on every connection.
+	// maxSplitCount allows large packets from third-party servers. Vanilla
+	// accepts 2048 fragments; Cloudburst's limit is 8192.
 	maxSplitCount = 8192
 	// maxConcurrentSplits bounds packets part way through reassembly, matching
 	// the client, which drops fragments that would start a further one.
 	maxConcurrentSplits = 256
+	// Bound fragments actually retained across incomplete packets. The count
+	// limit bounds metadata even when each fragment has little or no data.
+	maxSplitFragments = 2 * maxSplitCount
+	maxSplitBytes     = 16 << 20
 	// splitTimeout is how long a reassembly may go without a new fragment
 	// before its slot may be reclaimed. The client uses its connection timeout.
 	splitTimeout = time.Second * 10
@@ -40,12 +44,13 @@ const (
 	splitSweepInterval = time.Second
 )
 
-// splitEntry is a packet part way through reassembly. Fragments are positioned
-// by split index, received counts how many have arrived, and lastUpdate is when
-// the most recent one did.
+// splitEntry retains only fragments that have arrived, indexed by split index.
+// count is the expected total, size is the retained payload size, and lastUpdate
+// is when the most recent new fragment arrived.
 type splitEntry struct {
-	fragments  [][]byte
-	received   uint32
+	fragments  map[uint32][]byte
+	count      uint32
+	size       int
 	lastUpdate time.Time
 }
 
@@ -89,10 +94,10 @@ type Conn struct {
 	// losing bytes.
 	mtu uint16
 
-	// splits is a map of slices indexed by split IDs. The length of each of the
-	// slices is equal to the split count, and packets are positioned in that
-	// slice indexed by the split index.
+	// splits holds packets part way through reassembly, indexed by split ID.
 	splits map[uint16]splitEntry
+	// splitFragments and splitBytes track incomplete reassembly resources.
+	splitFragments, splitBytes int
 	// lastSplitSweep is when splits was last swept for expired reassemblies.
 	lastSplitSweep time.Time
 
@@ -568,52 +573,68 @@ func resolve(addr net.Addr) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
+var errSplitBudget = errors.New("split packet: reassembly memory limit reached")
+
 // receiveSplitPacket handles a passed split packet. If it is the last split
 // packet of its sequence, it will continue handling the full packet as it
 // otherwise would. An error is returned if the packet was not valid.
 func (conn *Conn) receiveSplitPacket(p *packet) error {
-	// Reject invalid split counts before allocating the fragment slice.
 	if p.splitCount == 0 || p.splitCount > maxSplitCount {
 		return fmt.Errorf("split packet: split count %v is out of range (1 - %v)", p.splitCount, maxSplitCount)
 	}
 	if p.splitIndex >= p.splitCount {
-		// The fragment fits no slot of the packet it claims to belong to. Drop
-		// it before the allocation below, which nothing would retain: a peer
-		// may repeat this fragment, and the concurrency cap cannot throttle it.
+		// The fragment fits no slot of the packet it claims to belong to.
 		return nil
 	}
 	entry, ok := conn.splits[p.splitID]
-	if ok && int(p.splitCount) != len(entry.fragments) {
+	if ok && p.splitCount != entry.count {
 		// The split count disagrees with the reassembly already under way for
 		// this ID, so the fragment belongs to neither. The client drops it.
 		return nil
 	}
-	if !ok {
-		if len(conn.splits) >= maxConcurrentSplits {
-			// Drop the fragment starting a new packet, never one already part
-			// reassembled: its fragments are acknowledged, so the sender will
-			// not send them again.
-			return nil
-		}
-		entry.fragments = make([][]byte, p.splitCount)
-	}
-	if entry.fragments[p.splitIndex] != nil {
+	if !ok && len(conn.splits) >= maxConcurrentSplits {
+		// Preserve existing progress when the concurrent packet limit is full.
 		return nil
 	}
+	if _, duplicate := entry.fragments[p.splitIndex]; duplicate {
+		return nil
+	}
+	if conn.splitFragments >= maxSplitFragments || len(p.content) > maxSplitBytes-conn.splitBytes {
+		// Close the connection on exhaustion: silently discarding acknowledged
+		// fragments could leave reliable delivery waiting forever.
+		return errSplitBudget
+	}
+	if !ok {
+		entry = splitEntry{fragments: make(map[uint32][]byte), count: p.splitCount}
+	}
 	entry.fragments[p.splitIndex] = p.content
-	entry.received++
+	entry.size += len(p.content)
 	entry.lastUpdate = time.Now()
 	conn.splits[p.splitID] = entry
+	conn.splitFragments++
+	conn.splitBytes += len(p.content)
 
-	if entry.received != uint32(len(entry.fragments)) {
+	if uint32(len(entry.fragments)) != entry.count {
 		// We haven't yet received all split fragments, so we cannot add the
 		// packets together yet.
 		return nil
 	}
-	p.content = slices.Concat(entry.fragments...)
+	p.content = make([]byte, entry.size)
+	offset := 0
+	for i := uint32(0); i < entry.count; i++ {
+		offset += copy(p.content[offset:], entry.fragments[i])
+	}
 
-	delete(conn.splits, p.splitID)
+	conn.removeSplit(p.splitID)
 	return conn.receivePacket(p)
+}
+
+// removeSplit releases a reassembly and its share of the connection's budget.
+func (conn *Conn) removeSplit(id uint16) {
+	entry := conn.splits[id]
+	conn.splitFragments -= len(entry.fragments)
+	conn.splitBytes -= entry.size
+	delete(conn.splits, id)
 }
 
 // evictExpiredSplits frees reassemblies that have not advanced within
@@ -622,7 +643,7 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 func (conn *Conn) evictExpiredSplits(now time.Time) {
 	for id, entry := range conn.splits {
 		if now.Sub(entry.lastUpdate) >= splitTimeout {
-			delete(conn.splits, id)
+			conn.removeSplit(id)
 		}
 	}
 }
