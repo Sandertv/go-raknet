@@ -26,7 +26,7 @@ func ExamplePing() {
 }
 
 func ExampleDial() {
-	const address = "mco.mineplex.com:19132"
+	const address = "play.inpvp.net:19132"
 
 	// Dial a connection to the target address. This will time out after up to 10 seconds. raknet.DialTimeout
 	// and raknet.DialContext may be used to cancel at any other time.
