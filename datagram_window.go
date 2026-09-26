@@ -15,14 +15,29 @@ func newDatagramWindow() *datagramWindow {
 	return &datagramWindow{queue: make(map[uint24]time.Time)}
 }
 
-// add puts an index in the window.
-func (win *datagramWindow) add(index uint24) bool {
-	if win.seen(index) {
-		return false
+// add puts an index in the window. skipped holds the indices the peer jumped
+// over, each marked so a gap is NACKed once, when it appears, as the client does.
+func (win *datagramWindow) add(index uint24) (ok bool, skipped []uint24) {
+	if index < win.lowest {
+		// Wire duplicate or reordered past the window. The client has no duplicate
+		// detection by datagram, so process it; ordered delivery drops true repeats.
+		return true, nil
+	}
+	if t, present := win.queue[index]; present {
+		if !t.IsZero() {
+			return false, nil
+		}
+		// Reported missing, but it was only reordered and has arrived after all.
+		win.queue[index] = time.Now()
+		return true, nil
+	}
+	for i := win.highest; i < index; i++ {
+		skipped = append(skipped, i)
+		win.queue[i] = time.Time{}
 	}
 	win.highest = max(win.highest, index+1)
 	win.queue[index] = time.Now()
-	return true
+	return true, skipped
 }
 
 // seen checks if the index passed is known to the datagramWindow.
@@ -47,31 +62,6 @@ func (win *datagramWindow) shift() (n int) {
 	}
 	win.lowest = index
 	return n
-}
-
-// missing returns a slice of all indices in the datagram queue that weren't
-// set using add while within the window of lowest and highest index. The queue
-// is shifted after this call.
-func (win *datagramWindow) missing(since time.Duration) (indices []uint24) {
-	missing := false
-	for index := int(win.highest) - 1; index >= int(win.lowest); index-- {
-		i := uint24(index)
-		t, ok := win.queue[i]
-		if ok {
-			if time.Since(t) >= since {
-				// All packets before this one took too long to arrive, so we
-				// mark them as missing.
-				missing = true
-			}
-			continue
-		}
-		if missing {
-			indices = append(indices, i)
-			win.queue[i] = time.Time{}
-		}
-	}
-	win.shift()
-	return indices
 }
 
 // size returns the size of the datagramWindow.

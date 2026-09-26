@@ -26,7 +26,31 @@ const (
 	minMTUSize    = 400
 	maxMTUSize    = 1492
 	maxWindowSize = 2048
+
+	// Bound queued application data so a stalled path cannot grow memory forever.
+	// Write waits at the limit; the reserve lets control traffic continue.
+	maxSendQueueBytes = 16 << 20
+	sendQueueReserve  = 64 << 10
+
+	// ackDelay is how long datagram acknowledgements are batched before being
+	// sent. It matches the SYN interval the client holds its own ACKs for, and
+	// bounds how far the peer's round trip estimate can be inflated by us.
+	ackDelay = time.Millisecond * 10
+
+	// resendBufferSize caps reliable datagrams awaiting acknowledgement. The
+	// client indexes a fixed 512 slot resend buffer and refuses to send new
+	// reliable data while the slot for the next message number is taken, which
+	// bounds a burst even when the congestion window is far larger.
+	resendBufferSize = 512
 )
+
+// queuedDatagram is a datagram waiting to be sent, with its wire size and the
+// bytes it counts in flight.
+type queuedDatagram struct {
+	pk            *packet
+	wireSize      uint32
+	inFlightBytes uint32
+}
 
 // Conn represents a connection to a specific client. It is not a real
 // connection, as UDP is connectionless, but rather a connection emulated using
@@ -83,6 +107,15 @@ type Conn struct {
 	// received over the last second. When ticked, all of these packets are sent
 	// in an ACK and the slice is cleared.
 	ackSlice []uint24
+	// oldestUnsentAck is when the first sequence number still in ackSlice was
+	// received. ACKs are held back until ackDelay has passed since then.
+	oldestUnsentAck time.Time
+	// ackedAny records whether any ACK has been received. Until one has, ACKs
+	// are flushed without delay, as the peer's retransmission timer is unknown.
+	ackedAny atomic.Bool
+	// ackTimer wakes the send loop once a batch has been held for ackDelay, so
+	// a batch that no further traffic follows is not left until the next tick.
+	ackTimer *time.Timer
 
 	// packetQueue is an ordered queue containing packets indexed by their order
 	// index.
@@ -94,6 +127,22 @@ type Conn struct {
 	// retransmission is a queue filled with packets that were sent with a given
 	// datagram sequence number.
 	retransmission *resendMap
+
+	congestion congestionWindow
+	// controlQueue is drained before application data.
+	controlQueue   []queuedDatagram
+	sendQueue      []queuedDatagram
+	sendQueueBytes uint32
+	// sendQueueFreed is closed and replaced when the send queue frees space, so
+	// that every writer waiting on it wakes to re-check its own requirement.
+	sendQueueFreed chan struct{}
+	sendBudget     uint32 // bytes still sendable this tick, refreshed each update
+	continuousSend bool   // data still queued last update; the window only grows then
+	wireContinuous bool   // per-datagram continuous-send flag on the wire
+	// sendSignal wakes the connection's own goroutine, which owns every send.
+	// Receiving goroutines only mutate state and signal, so a window drain
+	// never blocks the shared read loop of a Listener.
+	sendSignal chan struct{}
 
 	lastActivity atomic.Pointer[time.Time]
 }
@@ -114,6 +163,10 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		win:            newDatagramWindow(),
 		packetQueue:    newPacketQueue(),
 		retransmission: newRecoveryQueue(),
+		congestion:     newCongestionWindow(mtu - 28),
+		sendQueueFreed: make(chan struct{}),
+		sendSignal:     make(chan struct{}, 1),
+		sendBudget:     uint32(mtu - 28),
 		buf:            bytes.NewBuffer(make([]byte, 0, mtu-28)), // - headers.
 		ackBuf:         bytes.NewBuffer(make([]byte, 0, 128)),
 		nackBuf:        bytes.NewBuffer(make([]byte, 0, 64)),
@@ -152,12 +205,16 @@ func (conn *Conn) startTicking() {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-conn.sendSignal:
+			// Protocol activity opened the window, queued data or made a
+			// retransmission due. The client runs the same update on a 10ms
+			// timer that network activity signals early.
+			conn.flushACKs()
+			conn.update(time.Now())
 		case t := <-ticker.C:
 			i++
 			conn.flushACKs()
-			if i%3 == 0 {
-				conn.checkResend(t)
-			}
+			conn.update(t)
 			if unix := conn.closing.Load(); unix != 0 {
 				before := acksLeft
 				conn.mu.Lock()
@@ -174,15 +231,16 @@ func (conn *Conn) startTicking() {
 				continue
 			}
 			if i%5 == 0 {
-				// Ping the other end periodically to prevent timeouts.
 				_ = conn.send(&message.ConnectedPing{PingTime: timestamp()})
 
 				conn.mu.Lock()
-				if t.Sub(*conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt(t)*2 {
-					// No activity for too long: Start timeout.
+				timedOut := t.Sub(*conn.lastActivity.Load()) > time.Second*5+conn.retransmission.rtt()*2
+				conn.mu.Unlock()
+				if timedOut {
+					// Close sends a disconnect through Write, which takes conn.mu.
+					// Do not call it while holding the same non-reentrant mutex.
 					_ = conn.Close()
 				}
-				conn.mu.Unlock()
 			}
 		case <-conn.ctx.Done():
 			return
@@ -190,42 +248,75 @@ func (conn *Conn) startTicking() {
 	}
 }
 
-// flushACKs flushes all pending datagram acknowledgements.
+// flushACKs flushes pending datagram acknowledgements once they have been held
+// for ackDelay, batching the sequence numbers received in that window.
 func (conn *Conn) flushACKs() {
 	conn.ackMu.Lock()
 	defer conn.ackMu.Unlock()
 
-	if len(conn.ackSlice) > 0 {
-		// Write an ACK packet to the connection containing all datagram
-		// sequence numbers that we received since the last tick.
-		if err := conn.sendACK(conn.ackSlice...); err != nil {
-			return
-		}
-		conn.ackSlice = conn.ackSlice[:0]
+	if len(conn.ackSlice) == 0 || !conn.ackDue(time.Now()) {
+		return
 	}
+	// Write an ACK packet to the connection containing all datagram sequence
+	// numbers that we received since the last flush.
+	if err := conn.sendACK(conn.ackSlice...); err != nil {
+		return
+	}
+	conn.ackSlice = conn.ackSlice[:0]
+	conn.oldestUnsentAck = time.Time{}
 }
 
-// checkResend checks if the connection needs to resend any packets. It sends
-// an ACK for packets it has received and sends any packets that have been
-// pending for too long.
-func (conn *Conn) checkResend(now time.Time) {
+// ackDue reports whether pending ACKs have been held long enough. It must be
+// called with ackMu held.
+func (conn *Conn) ackDue(now time.Time) bool {
+	if !conn.ackedAny.Load() {
+		// The peer's retransmission timer is still unknown, so acknowledge
+		// without delay rather than risk a spurious resend.
+		return true
+	}
+	return !now.Before(conn.oldestUnsentAck.Add(ackDelay))
+}
+
+// update runs one send cycle: it recomputes the transmission budget from the
+// congestion window, retransmits records whose timer expired and drains as much
+// of the send queue as the budget allows. Only the connection's own goroutine
+// may call it.
+func (conn *Conn) update(now time.Time) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 
-	var (
-		resend []uint24
-		rtt    = conn.retransmission.rtt(now)
-		delay  = rtt + rtt/2
-	)
+	conn.congestion.continuous = conn.continuousSend
+	conn.wireContinuous = conn.continuousSend
+	conn.sendBudget = conn.congestion.transmissionBandwidth()
+
+	rtt := conn.retransmission.rtt()
 	conn.rtt.Store(int64(rtt))
 
-	for seq, t := range conn.retransmission.unacknowledged {
-		// These packets have not been acknowledged for too long: We resend them
-		// by ourselves, even though no NACK has been issued yet.
-		if now.Sub(t.timestamp) > delay {
+	if conn.retransmission.due(now) {
+		conn.resendExpired(now)
+	}
+	_ = conn.drainSendQueue()
+	conn.continuousSend = len(conn.controlQueue) != 0 || len(conn.sendQueue) != 0
+}
+
+// resendExpired retransmits every record whose send timer expired, oldest
+// first, and recomputes the earliest remaining timer.
+func (conn *Conn) resendExpired(now time.Time) {
+	var resend []uint24
+	deadline := time.Time{}
+	for seq, record := range conn.retransmission.unacknowledged {
+		if !now.Before(record.nextSend) {
 			resend = append(resend, seq)
+		} else if deadline.IsZero() || record.nextSend.Before(deadline) {
+			deadline = record.nextSend
 		}
 	}
+	conn.retransmission.deadline = deadline
+	slices.SortFunc(resend, func(a, b uint24) int {
+		return conn.retransmission.unacknowledged[a].nextSend.Compare(
+			conn.retransmission.unacknowledged[b].nextSend,
+		)
+	})
 	_ = conn.resend(resend)
 }
 
@@ -248,11 +339,50 @@ func (conn *Conn) writeWithReliability(b []byte, rel reliability) (n int, err er
 	case <-conn.ctx.Done():
 		return 0, conn.error(net.ErrClosed, "write")
 	default:
-		conn.mu.Lock()
-		defer conn.mu.Unlock()
-		n, err = conn.write(b, rel)
-		return n, conn.error(err, "write")
+		if len(b) == 0 {
+			return 0, nil
+		}
+		required := conn.queuedSize(b, rel)
+		if required > maxSendQueueBytes-sendQueueReserve {
+			return 0, conn.error(fmt.Errorf("packet requires %d bytes in the send queue", required), "write")
+		}
+		for {
+			conn.mu.Lock()
+			select {
+			case <-conn.ctx.Done():
+				conn.mu.Unlock()
+				return 0, conn.error(net.ErrClosed, "write")
+			default:
+			}
+			if conn.sendQueueBytes+required <= maxSendQueueBytes-sendQueueReserve {
+				n, err = conn.write(b, rel, false)
+				conn.mu.Unlock()
+				if err != nil {
+					n = 0
+				}
+				return n, conn.error(err, "write")
+			}
+			// Captured under the lock that guards the check above, so a drain
+			// between here and the wait closes this channel rather than
+			// signalling into one nobody is listening on yet.
+			freed := conn.sendQueueFreed
+			conn.mu.Unlock()
+
+			select {
+			case <-freed:
+			case <-conn.ctx.Done():
+				return 0, conn.error(net.ErrClosed, "write")
+			}
+		}
 	}
+}
+
+// queuedSize returns the wire bytes b occupies in the send queue, headers and
+// fragmentation included.
+func (conn *Conn) queuedSize(b []byte, rel reliability) uint32 {
+	count := splitCount(len(b), conn.effectiveMTU())
+	// Fragment payloads sum to len(b), and every fragment costs the same header.
+	return uint32(len(b) + count*(encapsulatedPacketSize(0, rel, count > 1)+4))
 }
 
 // write writes a buffer b over the RakNet connection. The amount of bytes
@@ -260,7 +390,7 @@ func (conn *Conn) writeWithReliability(b []byte, rel reliability) (n int, err er
 // was successful. If not, an error is returned and n is 0. Write may be called
 // simultaneously from multiple goroutines, but will write one by one. Unlike
 // Write, write will not lock.
-func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
+func (conn *Conn) write(b []byte, rel reliability, control bool) (n int, err error) {
 	fragments := split(b, conn.effectiveMTU())
 	var orderIndex uint24
 	if rel.sequencedOrOrdered() {
@@ -294,11 +424,18 @@ func (conn *Conn) write(b []byte, rel reliability) (n int, err error) {
 			pk.splitIndex = uint32(splitIndex)
 			pk.splitID = splitID
 		}
-		if err = conn.sendDatagram(pk); err != nil {
-			return 0, err
+		inFlightBytes := uint32(encapsulatedPacketSize(len(content), rel, pk.split))
+		wireSize := inFlightBytes + 4
+		datagram := queuedDatagram{pk: pk, wireSize: wireSize, inFlightBytes: inFlightBytes}
+		if control {
+			conn.controlQueue = append(conn.controlQueue, datagram)
+		} else {
+			conn.sendQueue = append(conn.sendQueue, datagram)
 		}
+		conn.sendQueueBytes += wireSize
 		n += len(content)
 	}
+	conn.signalSend()
 	return n, nil
 }
 
@@ -346,19 +483,47 @@ func (conn *Conn) Context() context.Context {
 // connection and closes the underlying UDP connection immediately.
 func (conn *Conn) closeImmediately() {
 	conn.once.Do(func() {
-		_, _ = conn.Write([]byte{message.IDDisconnectNotification})
+		conn.mu.Lock()
+		// Queue the disconnect and flush it before the handler closes a
+		// dialer's socket, since sends otherwise belong to the send loop, which
+		// is about to stop. Nothing outstanding will be acknowledged now, so
+		// release it first: that opens the resend buffer for the flush.
+		conn.releaseUnacknowledged()
+		_, _ = conn.write([]byte{message.IDDisconnectNotification}, reliabilityReliableOrdered, true)
+		conn.sendBudget = max(conn.sendBudget, uint32(conn.effectiveMTU()))
+		_ = conn.drainSendQueue()
+		conn.mu.Unlock()
+
 		conn.handler.close(conn)
 		conn.cancelFunc()
 
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
-		// Make sure to return all unacknowledged packets to the packet pool.
-		for _, record := range conn.retransmission.unacknowledged {
-			record.pk.content = record.pk.content[:0]
-			packetPool.Put(record.pk)
+		// The flush re-added whatever it sent.
+		conn.releaseUnacknowledged()
+		for _, datagram := range conn.sendQueue {
+			datagram.pk.content = datagram.pk.content[:0]
+			packetPool.Put(datagram.pk)
 		}
-		clear(conn.retransmission.unacknowledged)
+		for _, datagram := range conn.controlQueue {
+			datagram.pk.content = datagram.pk.content[:0]
+			packetPool.Put(datagram.pk)
+		}
+		conn.controlQueue = nil
+		conn.sendQueue = nil
+		conn.sendQueueBytes = 0
+		conn.signalSendQueueFreed()
 	})
+}
+
+// releaseUnacknowledged returns every packet awaiting acknowledgement to the
+// pool and forgets it. Only for a connection that is closing.
+func (conn *Conn) releaseUnacknowledged() {
+	for _, record := range conn.retransmission.unacknowledged {
+		record.pk.content = record.pk.content[:0]
+		packetPool.Put(record.pk)
+	}
+	clear(conn.retransmission.unacknowledged)
 }
 
 // RemoteAddr returns the remote address of the connection, meaning the address
@@ -392,16 +557,27 @@ func (conn *Conn) Latency() time.Duration {
 // send encodes an encoding.BinaryMarshaler and writes it to the Conn.
 func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
-	_, err := conn.Write(b)
-	return err
+	return conn.writeControl(b, reliabilityReliableOrdered)
 }
 
 // sendUnreliable encodes an encoding.BinaryMarshaler and writes it to the Conn using
 // unreliable reliability.
 func (conn *Conn) sendUnreliable(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
-	_, err := conn.writeWithReliability(b, reliabilityUnreliable)
-	return err
+	return conn.writeControl(b, reliabilityUnreliable)
+}
+
+// writeControl queues an internal packet (ping, disconnect) ahead of application
+// data. It fails rather than blocks when the queue is full.
+func (conn *Conn) writeControl(b []byte, rel reliability) error {
+	required := conn.queuedSize(b, rel)
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if conn.sendQueueBytes+required > maxSendQueueBytes {
+		return conn.error(errors.New("send queue is full"), "write")
+	}
+	_, err := conn.write(b, rel, true)
+	return conn.error(err, "write")
 }
 
 // packetPool is used to pool packets that encapsulate their content.
@@ -432,29 +608,34 @@ func (conn *Conn) receiveDatagram(b []byte) error {
 		return fmt.Errorf("read datagram: %w", io.ErrUnexpectedEOF)
 	}
 	seq := loadUint24(b)
-	if !conn.win.add(seq) {
-		// Datagram was already received, this might happen if a packet took a
-		// long time to arrive, and we already sent a NACK for it. This is
-		// expected to happen sometimes under normal circumstances, so no reason
-		// to return an error.
+	ok, skipped := conn.win.add(seq)
+	if !ok {
+		// A duplicate of a datagram still in the window. Not an error.
 		return nil
 	}
 	conn.ackMu.Lock()
 	// Add this sequence number to the received datagrams, so that it is
 	// included in an ACK.
-	conn.ackSlice = append(conn.ackSlice, seq)
-	conn.ackMu.Unlock()
-
-	if conn.win.shift() == 0 {
-		// Datagram window couldn't be shifted up, so we're still missing
-		// packets.
-		rtt := time.Duration(conn.rtt.Load())
-		if missing := conn.win.missing(rtt + rtt/2); len(missing) > 0 {
-			if err := conn.sendNACK(missing); err != nil {
-				return fmt.Errorf("receive datagram: send NACK: %w", err)
-			}
+	if len(conn.ackSlice) == 0 {
+		conn.oldestUnsentAck = time.Now()
+		if conn.ackTimer == nil {
+			conn.ackTimer = time.AfterFunc(ackDelay, conn.signalSend)
+		} else {
+			conn.ackTimer.Reset(ackDelay)
 		}
 	}
+	conn.ackSlice = append(conn.ackSlice, seq)
+	conn.ackMu.Unlock()
+	conn.signalSend()
+
+	if len(skipped) > 0 {
+		// NACK the gap immediately, as the client does: a delayed report loses the
+		// race against the sender's RTO, which cuts the window for a recoverable loss.
+		if err := conn.sendNACK(skipped); err != nil {
+			return fmt.Errorf("receive datagram: send NACK: %w", err)
+		}
+	}
+	conn.win.shift()
 	if conn.win.size() > maxWindowSize && conn.handler.limitsEnabled() {
 		return fmt.Errorf("receive datagram: queue window size is too big (%v-%v)", conn.win.lowest, conn.win.highest)
 	}
@@ -620,15 +801,18 @@ func (conn *Conn) handleACK(b []byte) error {
 	if err := ack.read(b); err != nil {
 		return fmt.Errorf("read ACK: %w", err)
 	}
+	conn.ackedAny.Store(true)
+	conn.congestion.continuous = conn.continuousSend
 	for _, sequenceNumber := range ack.packets {
-		// Take out all stored packets from the recovery queue.
-		if p, ok := conn.retransmission.acknowledge(sequenceNumber); ok {
-			// Clear the packet and return it to the pool so that it may be
-			// re-used.
-			p.content = p.content[:0]
-			packetPool.Put(p)
+		if record, ok := conn.retransmission.acknowledge(sequenceNumber); ok {
+			conn.congestion.acknowledged(record.inFlightBytes)
+			conn.congestion.ack(sequenceNumber, conn.seq)
+			record.pk.content = record.pk.content[:0]
+			packetPool.Put(record.pk)
 		}
 	}
+	// The window moved, so let the send loop recompute the budget and drain.
+	conn.signalSend()
 	return nil
 }
 
@@ -642,41 +826,177 @@ func (conn *Conn) handleNACK(b []byte) error {
 	if err := nack.read(b); err != nil {
 		return fmt.Errorf("read NACK: %w", err)
 	}
-	return conn.resend(nack.packets)
-}
-
-// resend sends all datagrams currently in the recovery queue with the sequence
-// numbers passed.
-func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
-	for _, sequenceNumber := range sequenceNumbers {
-		pk, ok := conn.retransmission.retransmit(sequenceNumber)
+	conn.congestion.nak(conn.seq)
+	// Bring the send timers forward so the next update retransmits them, which
+	// is how the client turns a NAK into a resend.
+	now := time.Now()
+	for _, sequenceNumber := range nack.packets {
+		record, ok := conn.retransmission.unacknowledged[sequenceNumber]
 		if !ok {
 			continue
 		}
-		if err = conn.sendDatagram(pk); err != nil {
+		record.nextSend = now
+		conn.retransmission.unacknowledged[sequenceNumber] = record
+		conn.retransmission.lowerDeadline(now)
+	}
+	conn.signalSend()
+	return nil
+}
+
+// resend sends all datagrams currently in the recovery queue with the sequence
+// numbers passed. A NAK reaches this through the same path as an expired timer,
+// as it does on the client: the NAK already marked the congestion block as
+// backed off, so congestionWindow.resend leaves the window alone for it.
+func (conn *Conn) resend(sequenceNumbers []uint24) (err error) {
+	// Retransmitted bytes already count as in flight. This budget caps one pass at
+	// the outstanding total and protects against accounting drift.
+	budget := conn.congestion.inFlight
+	var sent uint32
+	for _, sequenceNumber := range sequenceNumbers {
+		pending, ok := conn.retransmission.unacknowledged[sequenceNumber]
+		if !ok {
+			continue
+		}
+		if pending.inFlightBytes > budget || sent > budget-pending.inFlightBytes {
+			// Out of budget for this pass. Keep the remainder due so that the
+			// next update retries them.
+			conn.retransmission.lowerDeadline(pending.nextSend)
+			break
+		}
+		record, ok := conn.retransmission.retransmit(sequenceNumber)
+		if !ok {
+			continue
+		}
+		conn.congestion.resend(conn.seq)
+		if err = conn.sendDatagram(record.pk, record.inFlightBytes, true); err != nil {
+			return err
+		}
+		sent += record.inFlightBytes
+	}
+	if sent >= conn.sendBudget {
+		conn.sendBudget = 0
+	}
+	return nil
+}
+
+// sendable reports whether the next queued datagram fits in both the congestion
+// window and the resend buffer.
+func (conn *Conn) sendable(datagram queuedDatagram) bool {
+	if conn.sendBudget == 0 {
+		return false
+	}
+	if !datagram.pk.reliability.reliable() {
+		return true
+	}
+	return len(conn.retransmission.unacknowledged) < resendBufferSize
+}
+
+// drainSendQueue sends what the window and resend buffer allow, control queue
+// first. Only the send goroutine calls it.
+func (conn *Conn) drainSendQueue() error {
+	// Wake blocked writers once for the whole drain rather than per datagram:
+	// they re-check the budget anyway, and each signal costs a channel.
+	freed := false
+	defer func() {
+		if freed {
+			conn.signalSendQueueFreed()
+		}
+	}()
+	for len(conn.controlQueue) != 0 {
+		if !conn.sendable(conn.controlQueue[0]) {
+			return nil
+		}
+		datagram := conn.controlQueue[0]
+		conn.controlQueue[0] = queuedDatagram{}
+		conn.controlQueue = conn.controlQueue[1:]
+		conn.sendQueueBytes -= datagram.wireSize
+		freed = true
+		conn.consumeSendBudget(datagram.inFlightBytes)
+		if err := conn.sendDatagram(datagram.pk, datagram.inFlightBytes, false); err != nil {
+			return err
+		}
+	}
+	for len(conn.sendQueue) != 0 {
+		if !conn.sendable(conn.sendQueue[0]) {
+			return nil
+		}
+		datagram := conn.sendQueue[0]
+		conn.sendQueue[0] = queuedDatagram{}
+		conn.sendQueue = conn.sendQueue[1:]
+		conn.sendQueueBytes -= datagram.wireSize
+		freed = true
+		conn.consumeSendBudget(datagram.inFlightBytes)
+		if err := conn.sendDatagram(datagram.pk, datagram.inFlightBytes, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// sendDatagram sends a datagram over the connection that includes the packet
-// passed. It is assigned a new sequence number and added to the retransmission.
-func (conn *Conn) sendDatagram(pk *packet) error {
-	conn.buf.WriteByte(bitFlagDatagram | bitFlagNeedsBAndAS)
+// consumeSendBudget subtracts sent bytes from this tick's budget, floored at zero.
+func (conn *Conn) consumeSendBudget(size uint32) {
+	if size >= conn.sendBudget {
+		conn.sendBudget = 0
+		return
+	}
+	conn.sendBudget -= size
+}
+
+// signalSendQueueFreed wakes every writer waiting for send queue space. It must
+// be called with conn.mu held, which is what lets a writer capture the channel
+// and release the lock without racing a drain.
+func (conn *Conn) signalSendQueueFreed() {
+	close(conn.sendQueueFreed)
+	conn.sendQueueFreed = make(chan struct{})
+}
+
+// signalSend wakes the connection's send loop. Signals coalesce, so callers may
+// signal freely.
+func (conn *Conn) signalSend() {
+	select {
+	case conn.sendSignal <- struct{}{}:
+	default:
+	}
+}
+
+// sendDatagram numbers pk and writes it, tracking a reliable packet for resend
+// and counting it in flight unless retransmit says it already was.
+func (conn *Conn) sendDatagram(pk *packet, size uint32, retransmit bool) error {
+	header := byte(bitFlagDatagram)
+	if conn.congestion.slowStart() {
+		// The client sets this from its own slow start state, asking the peer
+		// to report bandwidth back while the window is still opening.
+		header |= bitFlagNeedsBAndAS
+	}
+	if conn.wireContinuous {
+		header |= bitFlagContinuousSend
+	}
+	conn.wireContinuous = true
+	conn.buf.WriteByte(header)
 	seq := conn.seq.Inc()
 	writeUint24(conn.buf, seq)
 	pk.write(conn.buf)
 	defer conn.buf.Reset()
 
 	if pk.reliability.reliable() {
-		// We then re-add the pk to the recovery queue in case the new one gets
-		// lost too, in which case we need to resend it again.
-		conn.retransmission.add(seq, pk)
+		conn.retransmission.add(seq, pk, size)
+		if !retransmit {
+			conn.congestion.sent(size)
+		}
 	}
 
 	if err := conn.writeTo(conn.buf.Bytes(), conn.raddr); err != nil {
+		if pk.reliability.reliable() {
+			delete(conn.retransmission.unacknowledged, seq)
+			conn.congestion.acknowledged(size)
+		}
+		pk.content = pk.content[:0]
+		packetPool.Put(pk)
 		return fmt.Errorf("send datagram: %w", err)
+	}
+	if !pk.reliability.reliable() {
+		pk.content = pk.content[:0]
+		packetPool.Put(pk)
 	}
 	return nil
 }

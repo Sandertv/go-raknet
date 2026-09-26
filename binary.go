@@ -12,7 +12,7 @@ type uint24 uint32
 // Inc increments a uint24 and returns the old value.
 func (u *uint24) Inc() (old uint24) {
 	ret := *u
-	*u += 1
+	*u = (*u + 1) & 0xffffff
 	return ret
 }
 
