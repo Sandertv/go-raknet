@@ -152,8 +152,13 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 		select {
 		case <-conn.connected:
 			// Add the connection to the incoming channel so that a caller of
-			// Accept() can receive it.
-			h.l.incoming <- conn
+			// Accept() can receive it, unless the listener is closed first:
+			// nobody will accept it then.
+			select {
+			case h.l.incoming <- conn:
+			case <-h.l.closed:
+				_ = conn.Close()
+			}
 		case <-h.l.closed:
 			_ = conn.Close()
 		case <-t.C:

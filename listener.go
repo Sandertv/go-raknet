@@ -139,11 +139,12 @@ func Listen(address string) (*Listener, error) {
 // data. If not successful, a nil listener is returned and an error describing
 // the problem.
 func (listener *Listener) Accept() (net.Conn, error) {
-	conn, ok := <-listener.incoming
-	if !ok {
+	select {
+	case conn := <-listener.incoming:
+		return conn, nil
+	case <-listener.closed:
 		return nil, &net.OpError{Op: "accept", Net: "raknet", Source: nil, Addr: nil, Err: ErrListenerClosed}
 	}
-	return conn, nil
 }
 
 // Addr returns the address the Listener is bound to and listening for
@@ -216,7 +217,6 @@ func (listener *Listener) listen() {
 		n, addr, err := listener.conn.ReadFrom(b)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				close(listener.incoming)
 				return
 			}
 			listener.conf.ErrorLog.Error("read from: "+err.Error(), "raddr", addrToStr(addr))
